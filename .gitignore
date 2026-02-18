@@ -1,0 +1,93 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+.env
+.env.*
+!.env.example
+
+# --- IDEs & Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Project Specific Data (运行时生成的动态文件) ---
+# 忽略所有临时文件目录
+temp/
+
+# 忽略 Tagger 的数据库存放位置
+tagger/*
+!tagger/put_tagger_db_here.txt
+
+# 忽略广播和统计相关的动态 JSON
+broadcast/broadcast_stats.json
+broadcast/broadcast_threads.json
+
+# 忽略 Mention 模块的运行时状态和日志
+mention/*
+!mention/.gitkeep
+!mention/settings_example.json
+!mention/threads_example.json
+!mention/usage_stats.json
+!mention/kb/.gitkeep
+
+# 忽略 API Table 的历史记录
+api_table/history.txt
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Tools ---
+.limcode/
+.kilocode/
+
+# banlist
+banlist.json
+
+# db and old db
+db.json
+feedback.db
+help.txt
+migrate_db.py
+quick_punish.db
+users.db
+api_table/*
+!api_table/.gitkeep
+app_save/*
+!app_save/.gitkeep
+app_temp/*
+!app_temp/.gitkeep
+broadcast/*
+!broadcast/.gitkeep
+role_configure/*
+!role_configure/.gitkeep
+rag_data/*
+!rag_data/.gitkeep
+
+# test scripts
+test_api_response.py
+scripts/*
+!scripts/init_rag.py
+test_assets/
+
+# LuaLS
+.luarc.json
+
+# prompt and xiaozuowen
+xiaozuowen/
+uploaded_prompt/
+rag_prompt/*
+!rag_prompt/.gitkeep
+prompt/*
+!prompt/.gitkeep
+# docs
+
+/docs

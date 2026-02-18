@@ -1,0 +1,18 @@
+{
+    "global_enabled": true,
+    "stream_interval":2,
+    "allowed_thread_ids": [""],
+    "moderator_role_ids": [""],
+    "allowed_role_ids": [""],
+    "global_blacklisted_user_ids": [],
+    "thread_cooldown_seconds": 5,
+    "user_cooldown_seconds": 20,
+    "max_daily_requests_per_user": 100,
+    "read_reply_history_depth": 5,
+    "fail2ban_max_tries":3,
+    "fail2ban_min_time_minutes": 2,
+    "fail2ban_ban_time_minutes": 60,
+    "log_save_days": 1,
+    "op_welcome_message":"",
+    "prompt_log_count": 5
+}

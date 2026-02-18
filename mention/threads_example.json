@@ -1,0 +1,16 @@
+{
+    "":{
+        "id":1,
+        "ownerID":1234567,
+        "blacklisted_users_ID": [],
+        "xSettings":{
+            "thread_cd_seconds": 30,
+            "user_cd_seconds": 10,
+            "read_user_interaction_history": 3,
+            "use_default_knowledge_base":true,
+            "preset":[
+                ["我是白名单关键词","我是黑名单关键词","我是预设的回复内容"]
+            ]
+        }
+    }
+}
