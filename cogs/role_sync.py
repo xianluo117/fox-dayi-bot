@@ -163,7 +163,7 @@ class RoleSyncCog(commands.Cog):
             self._update_bot_data()
             
             # 构建结果消息
-            result_message = f"✅ **身份组同步完成**\n"
+            result_message = "✅ **身份组同步完成**\n"
             result_message += f"📋 **Discord身份组**: `{discord_role.name}` (ID: {role_id})\n"
             result_message += f"🎯 **目标数据库组**: `{db_group}`\n\n"
             

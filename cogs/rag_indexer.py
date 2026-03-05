@@ -6,7 +6,6 @@ RAG 智能索引器模块
 import re
 from typing import List, Dict, Optional, Tuple
 import tiktoken
-import discord
 from discord.ext import commands
 
 class RAGIndexer:
@@ -143,7 +142,7 @@ class RAGIndexer:
                 elif '###' in first_line: # 如果紧接着是三级标题，用它
                     title = first_line.lstrip('#').strip()
                 else:
-                    title = f"Section"
+                    title = "Section"
 
             elif separator_text.startswith('#'):
                 level = separator_text.count('#')

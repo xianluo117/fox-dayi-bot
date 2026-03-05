@@ -113,7 +113,7 @@ class DebugRole(commands.Cog):
                     embed.add_field(name='目标用户', value=f'{user.mention}\n({user.id})', inline=True)
                     embed.add_field(name='添加的身份组', value=f'{role.mention}\n({role.id})', inline=True)
                     embed.add_field(name='操作者', value=f'{interaction.user.mention}', inline=True)
-                    embed.set_footer(text=f'操作时间')
+                    embed.set_footer(text='操作时间')
                     embed.timestamp = discord.utils.utcnow()
                     
                     await interaction.followup.send(embed=embed, ephemeral=True)
@@ -122,7 +122,7 @@ class DebugRole(commands.Cog):
                     
                 except discord.Forbidden:
                     await interaction.followup.send(
-                        f'❌ 无法为用户添加身份组。可能是权限不足或其他限制。',
+                        '❌ 无法为用户添加身份组。可能是权限不足或其他限制。',
                         ephemeral=True
                     )
                     log_slash_command(interaction, False)
@@ -156,7 +156,7 @@ class DebugRole(commands.Cog):
                     embed.add_field(name='目标用户', value=f'{user.mention}\n({user.id})', inline=True)
                     embed.add_field(name='删除的身份组', value=f'{role.mention}\n({role.id})', inline=True)
                     embed.add_field(name='操作者', value=f'{interaction.user.mention}', inline=True)
-                    embed.set_footer(text=f'操作时间')
+                    embed.set_footer(text='操作时间')
                     embed.timestamp = discord.utils.utcnow()
                     
                     await interaction.followup.send(embed=embed, ephemeral=True)
@@ -165,7 +165,7 @@ class DebugRole(commands.Cog):
                     
                 except discord.Forbidden:
                     await interaction.followup.send(
-                        f'❌ 无法从用户删除身份组。可能是权限不足或其他限制。',
+                        '❌ 无法从用户删除身份组。可能是权限不足或其他限制。',
                         ephemeral=True
                     )
                     log_slash_command(interaction, False)

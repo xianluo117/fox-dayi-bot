@@ -9,10 +9,10 @@ from discord import app_commands
 import json
 import asyncio
 import os
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta
 import pytz
 import logging
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, Tuple, Optional
 import traceback
 
 # 设置日志
@@ -83,7 +83,7 @@ class BroadcastCog(commands.Cog):
             if os.path.exists(self.stats_path):
                 with open(self.stats_path, 'r', encoding='utf-8') as f:
                     self.stats = json.load(f)
-                logger.info(f"已加载统计数据")
+                logger.info("已加载统计数据")
                 
                 # 检查并重置过期的每日计数
                 self.reset_daily_counts()

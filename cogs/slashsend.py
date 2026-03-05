@@ -1,7 +1,6 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from datetime import datetime
 import re
 from cogs.logger import log_slash_command
 

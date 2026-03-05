@@ -2,7 +2,6 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import os
-import openai
 import asyncio
 import json
 from datetime import datetime
@@ -81,7 +80,7 @@ class RecognizeURL(commands.Cog):
             
             # 如果小于限制，直接返回
             if original_size_kb <= max_size_kb:
-                print(f"✅ 图片大小符合要求，无需压缩")
+                print("✅ 图片大小符合要求，无需压缩")
                 return image_path
             
             # 需要压缩
@@ -410,7 +409,7 @@ class RecognizeURL(commands.Cog):
                 
                 # 处理响应
                 if isinstance(response, list):
-                    print(f"⚠️ 检测到列表响应，尝试提取第一个元素")
+                    print("⚠️ 检测到列表响应，尝试提取第一个元素")
                     if response and len(response) > 0 and hasattr(response[0], 'choices'):
                         response = response[0]
                 
@@ -434,7 +433,7 @@ class RecognizeURL(commands.Cog):
                 await interaction.edit_original_response(
                     content="⏱️ API请求超时（60秒），请稍后重试。"
                 )
-                print(f"⚠️ URL检查API请求超时")
+                print("⚠️ URL检查API请求超时")
                 return
             
         except Exception as e:

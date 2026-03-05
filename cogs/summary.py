@@ -4,15 +4,7 @@ from discord import app_commands
 import os
 import openai
 import asyncio
-import mimetypes
-import base64
-from datetime import datetime, timedelta
-import json
-import random
 from typing import Optional, List, Dict, Tuple
-from cogs.rag_processor import RAGProcessor
-from PIL import Image
-import io
 import re
 
 # --- 安全的 defer 函数 ---
@@ -472,7 +464,7 @@ class Summary(commands.Cog):
         full_prompt = f"{head_prompt}\n{formatted_messages}\n{end_prompt}"
         
         # 添加调试日志
-        print(f"📊 准备发送给AI的消息统计:")
+        print("📊 准备发送给AI的消息统计:")
         print(f"  - 实际消息数: {len(messages)} 条")
         print(f"  - 格式化后文本长度: {len(formatted_messages)} 字符")
         print(f"  - 完整提示词长度: {len(full_prompt)} 字符")
@@ -533,7 +525,7 @@ class Summary(commands.Cog):
             f"⏱️ 时间跨度: {time_span_str}",
             f"👥 参与人数: {len(participants)} 人",
             f"📢 频道: <#{channel_id}>",
-            f"模型: fox-summarizer",
+            "模型: fox-summarizer",
             "------------------------------",
         ]
         header_text = "\n".join(header_lines)

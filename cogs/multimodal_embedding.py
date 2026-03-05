@@ -154,10 +154,10 @@ class MultimodalEmbeddingHandler:
         
         try:
             # 直接使用data URI格式，这是唯一有效的方式
-            print(f"🖼️ [多模态] 调用embedding API")
+            print("🖼️ [多模态] 调用embedding API")
             print(f"   - 模型: {self.model}")
             print(f"   - API base URL: {self.client.base_url}")
-            print(f"   - 输入格式: data URI")
+            print("   - 输入格式: data URI")
             
             response = await loop.run_in_executor(
                 None,
@@ -176,7 +176,7 @@ class MultimodalEmbeddingHandler:
             
             # 如果是500错误，提供更详细的错误信息
             if "500" in str(e) or "InternalServerError" in str(e):
-                print(f"💡 [多模态] 提示：API返回500错误，可能是服务端问题或格式不支持")
+                print("💡 [多模态] 提示：API返回500错误，可能是服务端问题或格式不支持")
                 print(f"   - 图片大小: {len(processed_image)} bytes")
                 print(f"   - Base64长度: {len(image_base64)} chars")
             

@@ -79,7 +79,7 @@ async def init_rag_system():
             if os.path.exists(prompt_dir):
                 files = [f for f in os.listdir(prompt_dir) if f.endswith('.txt')]
                 if files:
-                    print(f"\n可用的知识库文件:")
+                    print("\n可用的知识库文件:")
                     for i, f in enumerate(files, 1):
                         print(f"  {i}. {f}")
                     
@@ -115,7 +115,7 @@ async def init_rag_system():
             print("\n🔄 开始索引文档...")
             chunk_count = await processor.index_document(content, source=knowledge_file)
             
-            print(f"\n✅ 索引完成！")
+            print("\n✅ 索引完成！")
             print(f"  - 生成了 {chunk_count} 个文档块")
             
             # 测试检索

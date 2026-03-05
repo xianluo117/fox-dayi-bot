@@ -3,8 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import os
 import sqlite3
-import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 from typing import Optional, List, Dict, Tuple
 import aiofiles
@@ -729,18 +728,18 @@ class QuickPunishCog(commands.Cog):
         # 构建完整私信
         dm_parts = [
             "# === 答题处罚通知 ===\n",
-            f"你已被要求重新答题。",
+            "你已被要求重新答题。",
             f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"频道：#{target_message.channel.name}",
             f"原因：{reason}",
             f"执行者：{executor.name}\n",
             third_content.strip(),
-            f"\n请仔细阅读以上内容和社区规则，重新完成新人验证答题。"
+            "\n请仔细阅读以上内容和社区规则，重新完成新人验证答题。"
         ]
         
         # 添加申诉信息
         if self.appeal_channel_id:
-            dm_parts.append(f"\n# 请勿回复此信息。如有异议，请联系管理员。")
+            dm_parts.append("\n# 请勿回复此信息。如有异议，请联系管理员。")
         
         return "\n".join(dm_parts)
     
@@ -1170,7 +1169,7 @@ class QuickPunishCog(commands.Cog):
         
         if not success:
             await interaction.followup.send(
-                f"❌ 撤销处罚失败，可能记录已被修改",
+                "❌ 撤销处罚失败，可能记录已被修改",
                 ephemeral=True
             )
             return

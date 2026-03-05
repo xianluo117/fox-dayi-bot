@@ -6,10 +6,10 @@ import openai
 import asyncio
 import mimetypes
 import base64
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import random
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List
 from cogs.rag_processor import RAGProcessor
 from PIL import Image
 import io
@@ -110,7 +110,7 @@ class AppDayi(commands.Cog):
             
             # 如果小于限制，直接返回
             if original_size_kb <= max_size_kb:
-                print(f"✅ 图片大小符合要求，无需压缩")
+                print("✅ 图片大小符合要求，无需压缩")
                 return image_path
             
             # 需要压缩
@@ -236,33 +236,33 @@ class AppDayi(commands.Cog):
             
             # 🔧 修复：处理异步调用可能返回列表的问题
             if isinstance(response, list):
-                print(f"⚠️ [图片描述] 检测到列表响应，尝试提取第一个元素")
+                print("⚠️ [图片描述] 检测到列表响应，尝试提取第一个元素")
                 if response and len(response) > 0:
                     # 检查第一个元素是否有 choices 属性
                     if hasattr(response[0], 'choices'):
                         response = response[0]
-                        print(f"✅ [图片描述] 成功从列表中提取响应对象")
+                        print("✅ [图片描述] 成功从列表中提取响应对象")
                     else:
                         # 可能整个列表就是 choices
-                        print(f"⚠️ [图片描述] 列表可能就是 choices，尝试直接使用")
+                        print("⚠️ [图片描述] 列表可能就是 choices，尝试直接使用")
                         # 创建一个模拟的响应对象
                         class MockResponse:
                             def __init__(self, choices):
                                 self.choices = choices
                         response = MockResponse(response)
                 else:
-                    print(f"❌ [图片描述] 错误：返回了空列表")
+                    print("❌ [图片描述] 错误：返回了空列表")
                     return "图片描述失败: API返回了空列表"
             
             # 检查 choices 是否存在
             if not hasattr(response, 'choices'):
-                print(f"❌ [图片描述] 错误：response 没有 choices 属性")
+                print("❌ [图片描述] 错误：response 没有 choices 属性")
                 print(f"   response 类型: {type(response)}")
                 return "图片描述失败: API响应格式错误"
             
             # 检查 choices 是否为空
             if not response.choices or len(response.choices) == 0:
-                print(f"❌ [图片描述] 错误：choices 为空")
+                print("❌ [图片描述] 错误：choices 为空")
                 return "图片描述失败: API未返回结果"
                 
             description = response.choices[0].message.content
@@ -297,7 +297,7 @@ class AppDayi(commands.Cog):
         
         # 任务1：文本RAG检索
         if text:
-            print(f"📝 启动文本RAG检索任务")
+            print("📝 启动文本RAG检索任务")
             tasks.append(self.rag_processor.retrieve_context(text))
             task_types.append("text")
         
@@ -588,7 +588,7 @@ class AppDayi(commands.Cog):
             
             # 如果有图片，创建压缩任务
             if image_paths:
-                print(f"🚀 开始并行处理：图片压缩 + RAG检索...")
+                print("🚀 开始并行处理：图片压缩 + RAG检索...")
                 parallel_tasks['compress'] = asyncio.gather(
                     *[self._compress_image(path) for path in image_paths]
                 )
@@ -604,7 +604,7 @@ class AppDayi(commands.Cog):
                         # 先等待压缩完成，然后使用压缩后的图片进行描述和RAG
                         if 'compress' in parallel_tasks:
                             compressed_paths = await parallel_tasks['compress']
-                            print(f"✅ 图片压缩完成")
+                            print("✅ 图片压缩完成")
                         
                         # 新流程：并行处理文本和多张图片（使用压缩后的图片）
                         print(f"🚀 开始并行RAG检索 - 文本长度: {len(text)}, 图片数量: {len(compressed_paths)}")
@@ -641,7 +641,7 @@ class AppDayi(commands.Cog):
             # 如果还没有执行压缩，现在执行（处理没有RAG的情况）
             if image_paths and 'compress' in parallel_tasks and compressed_paths == image_paths:
                 compressed_paths = await parallel_tasks['compress']
-                print(f"✅ 图片压缩完成")
+                print("✅ 图片压缩完成")
             
             # 使用压缩后的路径替换原始路径
             if compressed_paths != image_paths:
@@ -700,7 +700,7 @@ class AppDayi(commands.Cog):
             client = self.bot.openai_client # 假设 client 在 bot 实例上
             
             # 🔍 添加调试信息：记录请求详情
-            print(f"📤 [API请求] 准备发送请求:")
+            print("📤 [API请求] 准备发送请求:")
             print(f"   - 模型: {os.getenv('OPENAI_MODEL')}")
             print(f"   - 文本长度: {len(text)} 字符")
             print(f"   - 图片数量: {len(image_paths)} 张")
@@ -730,7 +730,7 @@ class AppDayi(commands.Cog):
                 response = raw_response
                 
                 # 🔍 详细记录响应类型和结构
-                print(f"📥 [API响应] 收到响应:")
+                print("📥 [API响应] 收到响应:")
                 print(f"   - 类型: {type(response)}")
                 print(f"   - 是否为列表: {isinstance(response, list)}")
                 
@@ -745,7 +745,7 @@ class AppDayi(commands.Cog):
                         
                         # 策略1：检查是否每个元素都是完整的ChatCompletion对象
                         if all(hasattr(item, 'choices') for item in response if item is not None):
-                            print(f"   ✅ 列表中所有元素都有choices属性")
+                            print("   ✅ 列表中所有元素都有choices属性")
                             # 合并所有响应的内容
                             combined_content = []
                             for idx, item in enumerate(response):
@@ -773,14 +773,14 @@ class AppDayi(commands.Cog):
                         # 策略2：第一个元素有choices属性
                         elif hasattr(response[0], 'choices'):
                             response = response[0]
-                            print(f"   ✅ [主API] 从列表中提取第一个响应对象")
+                            print("   ✅ [主API] 从列表中提取第一个响应对象")
                         
                         # 策略3：列表本身可能就是choices
                         else:
-                            print(f"   ⚠️ [主API] 列表元素没有choices属性")
+                            print("   ⚠️ [主API] 列表元素没有choices属性")
                             # 检查列表元素是否像choice对象
                             if hasattr(response[0], 'message'):
-                                print(f"   - 检测到message属性，尝试构造响应")
+                                print("   - 检测到message属性，尝试构造响应")
                                 # 创建模拟的响应对象
                                 class MockResponse:
                                     def __init__(self, choices):
@@ -789,7 +789,7 @@ class AppDayi(commands.Cog):
                                         self.created = None
                                 response = MockResponse(response)
                             else:
-                                print(f"   ❌ 无法解析列表响应格式")
+                                print("   ❌ 无法解析列表响应格式")
                                 await interaction.edit_original_response(
                                     content="❌ **API响应格式异常**\n"
                                            f"当处理{len(image_attachments)}张图片时，API返回了无法解析的格式。\n\n"
@@ -800,7 +800,7 @@ class AppDayi(commands.Cog):
                                 )
                                 return
                     else:
-                        print(f"   ❌ API返回了空列表")
+                        print("   ❌ API返回了空列表")
                         await interaction.edit_original_response(
                             content="❌ **API返回空列表**\n"
                                    f"处理{len(image_attachments)}张图片时出现问题。\n\n"
@@ -813,12 +813,12 @@ class AppDayi(commands.Cog):
                 
                 # 记录最终响应信息
                 if hasattr(response, 'choices'):
-                    print(f"   ✅ 最终响应有choices属性")
+                    print("   ✅ 最终响应有choices属性")
                     print(f"   - choices数量: {len(response.choices) if response.choices else 0}")
                 
                 # 检查响应对象属性
                 if not hasattr(response, 'choices'):
-                    print(f"❌ [主API] 错误：response 没有 choices 属性")
+                    print("❌ [主API] 错误：response 没有 choices 属性")
                     print(f"   - response 类型: {type(response)}")
                     print(f"   - response 内容预览: {str(response)[:500]}")
                     await interaction.edit_original_response(

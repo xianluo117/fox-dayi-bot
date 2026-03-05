@@ -4,8 +4,7 @@ from discord import app_commands
 import psutil
 import os
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
-import json
+from datetime import datetime
 import openai
 import asyncio
 import mimetypes
@@ -52,7 +51,7 @@ def load_knowledge_bases():
     prompt_file_map = {}
     
     if not os.path.exists(prompt_dir):
-        print(f" [警告] prompt文件夹不存在，将使用默认知识库")
+        print(" [警告] prompt文件夹不存在，将使用默认知识库")
         return [app_commands.Choice(name="无特定知识库", value="无")], {"无": "prompt/None.txt"}
     
     try:

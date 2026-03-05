@@ -13,7 +13,6 @@ from datetime import datetime, timedelta
 import logging
 from typing import Dict, List, Optional, Tuple
 import traceback
-import openai
 import base64
 import mimetypes
 from PIL import Image
@@ -88,7 +87,7 @@ class MentionCog(commands.Cog):
             if os.path.exists(self.settings_path):
                 with open(self.settings_path, 'r', encoding='utf-8') as f:
                     self.settings = json.load(f)
-                logger.info(f"已加载全局设置")
+                logger.info("已加载全局设置")
             else:
                 logger.warning(f"设置文件不存在: {self.settings_path}，使用默认设置")
                 self.settings = {
@@ -146,7 +145,7 @@ class MentionCog(commands.Cog):
             if os.path.exists(self.usage_stats_path):
                 with open(self.usage_stats_path, 'r', encoding='utf-8') as f:
                     self.usage_stats = json.load(f)
-                logger.info(f"已加载使用统计数据")
+                logger.info("已加载使用统计数据")
                 # 清理过期数据
                 self.cleanup_old_stats()
             else:
@@ -220,7 +219,7 @@ class MentionCog(commands.Cog):
             
             # 如果小于限制，直接返回
             if original_size_kb <= max_size_kb:
-                logger.info(f"✅ 图片大小符合要求，无需压缩")
+                logger.info("✅ 图片大小符合要求，无需压缩")
                 return image_path
             
             # 需要压缩
@@ -586,7 +585,7 @@ class MentionCog(commands.Cog):
                     ban_time = self.settings.get('fail2ban_ban_time_minutes', 60)
                     await message.reply(f"⏰ 该帖子的自助答疑功能冷却中，请稍后再试。\n\n⚠️ 由于请求连续失败，你已被机器人忽略 {ban_time} 分钟。")
                 else:
-                    await message.reply(f"⏰ 该帖子的自助答疑功能冷却中，请稍后再试。")
+                    await message.reply("⏰ 该帖子的自助答疑功能冷却中，请稍后再试。")
                 logger.info(f"子区 {thread_id} 在冷却中")
                 return
             
@@ -694,7 +693,7 @@ class MentionCog(commands.Cog):
                     compressed_image_paths.append(compressed_path)
                     if compressed_path != img_path:
                         temp_files.append(compressed_path)  # 记录压缩后的图片路径
-                logger.info(f"✅ 图片压缩完成")
+                logger.info("✅ 图片压缩完成")
             
             # 构建提示词
             system_prompt = await self.build_prompt(thread_id, context_messages)

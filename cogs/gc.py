@@ -42,14 +42,14 @@ class AutoGarbageCollector(commands.Cog):
             handler.setFormatter(formatter)
             self.logger.addHandler(handler)
         
-        print(f"🗑️ 自动清理功能初始化完成:")
-        print(f"\n📁 临时文件清理:")
+        print("🗑️ 自动清理功能初始化完成:")
+        print("\n📁 临时文件清理:")
         print(f"   - 启用状态: {self.enabled}")
         print(f"   - 清理间隔: {self.interval_hours} 小时")
         print(f"   - 文件保留时间: {self.grace_minutes} 分钟")
         print(f"   - 清理文件夹: {', '.join(self.cleanup_folders)}")
         
-        print(f"\n📚 存档文件清理:")
+        print("\n📚 存档文件清理:")
         print(f"   - 启用状态: {self.archive_enabled}")
         print(f"   - 清理间隔: {self.archive_interval_hours} 小时")
         print(f"   - 文件保留时间: {self.archive_grace_hours} 小时")

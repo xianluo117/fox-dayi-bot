@@ -4,7 +4,6 @@ from discord import app_commands
 import os
 from datetime import datetime
 import asyncio
-import sqlite3
 import logging
 
 # 配置日志
@@ -172,7 +171,7 @@ class GetContextCog(commands.Cog):
         
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(f"子区消息内容导出\n")
+                f.write("子区消息内容导出\n")
                 f.write(f"导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write(f"总消息数: {len(messages)}\n")
                 f.write("=" * 50 + "\n\n")

@@ -7,7 +7,7 @@ RAG处理器模块
 import os
 import asyncio
 import json
-from typing import List, Dict, Optional, Tuple, Union
+from typing import List, Dict, Optional, Union
 import openai
 import tiktoken
 import chromadb
@@ -24,8 +24,7 @@ from cogs.rag_indexer import RAGIndexer
 from cogs.multimodal_embedding import (
     MultimodalEmbeddingHandler,
     MultimodalDocument,
-    ContentType,
-    load_image_as_bytes
+    ContentType
 )
 
 
@@ -126,7 +125,7 @@ class RAGProcessor:
         api_base = os.getenv("EMBEDDING_API_BASE") or os.getenv("OPENAI_API_BASE_URL")
         
         # 添加调试日志
-        print(f"🔧 [RAG] 初始化Embedding客户端:")
+        print("🔧 [RAG] 初始化Embedding客户端:")
         print(f"   - EMBEDDING_API_KEY: {'已设置' if os.getenv('EMBEDDING_API_KEY') else '未设置'}")
         print(f"   - EMBEDDING_API_BASE: {os.getenv('EMBEDDING_API_BASE') or '未设置'}")
         print(f"   - 实际使用的API Key: {'EMBEDDING_API_KEY' if os.getenv('EMBEDDING_API_KEY') else 'OPENAI_API_KEY'}")
@@ -144,7 +143,7 @@ class RAGProcessor:
             api_key=api_key,
             base_url=api_base
         )
-        print(f"✅ [RAG] Embedding客户端初始化完成")
+        print("✅ [RAG] Embedding客户端初始化完成")
         
     def _init_text_splitter(self):
         """初始化文本分割器"""
@@ -184,7 +183,7 @@ class RAGProcessor:
                 print(f"⚠️ 未找到兜底提示词文件 {app_end_path}，使用默认值")
                 self.prompt_end = "请根据提供的相关知识准确回答用户问题。如果相关知识不足以回答问题，请诚实地说明。"
                 
-            print(f"✅ 提示词模板加载成功")
+            print("✅ 提示词模板加载成功")
             
         except Exception as e:
             print(f"❌ 加载提示词模板失败: {e}")
@@ -249,7 +248,7 @@ class RAGProcessor:
             await self._wait_for_rate_limit()
             
             # 调试日志
-            print(f"🔄 [RAG] 正在调用embedding API:")
+            print("🔄 [RAG] 正在调用embedding API:")
             print(f"   - 后端: {self.embedding_backend}")
             print(f"   - 模型: {self.embedding_model}")
             print(f"   - 文本数量: {len(texts)}")
@@ -288,7 +287,7 @@ class RAGProcessor:
                     return [item["embedding"] for item in resp_json.get("data", [])]
                 except urllib.error.HTTPError as e:
                     if e.code == 429:
-                        print(f"⚠️ 遇到429错误（SiliconFlow），等待60秒后重试...")
+                        print("⚠️ 遇到429错误（SiliconFlow），等待60秒后重试...")
                         await asyncio.sleep(60)
                         return await self.get_embeddings_batch(texts)
                     else:
@@ -313,7 +312,7 @@ class RAGProcessor:
             
         except Exception as e:
             if "429" in str(e):
-                print(f"⚠️ 遇到429错误，等待60秒后重试...")
+                print("⚠️ 遇到429错误，等待60秒后重试...")
                 await asyncio.sleep(60)
                 # 递归重试
                 return await self.get_embeddings_batch(texts)
