@@ -9,8 +9,6 @@ import base64
 from datetime import datetime
 import json
 import random
-from typing import Optional, List
-from cogs.rag_processor import RAGProcessor
 from PIL import Image
 import io
 
@@ -55,18 +53,6 @@ class AppDayi(commands.Cog):
         # 冷却时间（秒）
         self.cooldown_duration = 30
         
-        # 初始化RAG处理器（如果启用）
-        self.rag_processor = None
-        if os.getenv("RAG_ENABLED", "false").lower() == "true":
-            try:
-                self.rag_processor = RAGProcessor()
-                print("✅ RAG系统已启用并初始化")
-            except Exception as e:
-                print(f"⚠️ RAG系统初始化失败: {e}")
-                self.rag_processor = None
-        else:
-            print("ℹ️ RAG系统未启用")
-            
         # 将上下文菜单命令添加到 bot 的 tree 中
         self.ctx_menu = app_commands.ContextMenu(
             name='快速答疑',
@@ -185,200 +171,6 @@ class AppDayi(commands.Cog):
             print(f"❌ 图片压缩失败: {e}")
             # 压缩失败时返回原始路径
             return image_path
-    
-    async def _describe_image(self, image_path: str) -> str:
-        """
-        使用图片描述模型生成图片的文本描述
-        
-        Args:
-            image_path: 图片文件路径
-            
-        Returns:
-            图片的文本描述
-        """
-        try:
-            # 系统提示词
-            system_prompt = """你是专业图片描述助手。请详细描述图片中的内容，包括：
-- 主要对象
-- 文字内容（如果有，请完整准确地提取，包括文字的颜色等）
-- 技术细节（如代码、图表、UI界面、错误信息等）
-
-用简洁准确的中文描述，重点关注可能与技术问题相关的内容。"""
-            
-            # 编码图片
-            base64_image = encode_image_to_base64(image_path)
-            
-            # 构建请求
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": base64_image}}
-                ]}
-            ]
-            
-            # 调用API（使用IMAGE_DESCRIBE_MODEL）
-            client = self.bot.openai_client
-            loop = asyncio.get_event_loop()
-            
-            # 设置较短的超时时间（30秒）
-            response = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: client.chat.completions.create(
-                        model=os.getenv("IMAGE_DESCRIBE_MODEL", "gemini-2.5-flash-lite-preview-06-17"),
-                        messages=messages,
-                        temperature=0.3,  # 较低的温度以获得更准确的描述
-                        max_tokens=600
-                    )
-                ),
-                timeout=30.0
-            )
-            
-            # 🔧 修复：处理异步调用可能返回列表的问题
-            if isinstance(response, list):
-                print("⚠️ [图片描述] 检测到列表响应，尝试提取第一个元素")
-                if response and len(response) > 0:
-                    # 检查第一个元素是否有 choices 属性
-                    if hasattr(response[0], 'choices'):
-                        response = response[0]
-                        print("✅ [图片描述] 成功从列表中提取响应对象")
-                    else:
-                        # 可能整个列表就是 choices
-                        print("⚠️ [图片描述] 列表可能就是 choices，尝试直接使用")
-                        # 创建一个模拟的响应对象
-                        class MockResponse:
-                            def __init__(self, choices):
-                                self.choices = choices
-                        response = MockResponse(response)
-                else:
-                    print("❌ [图片描述] 错误：返回了空列表")
-                    return "图片描述失败: API返回了空列表"
-            
-            # 检查 choices 是否存在
-            if not hasattr(response, 'choices'):
-                print("❌ [图片描述] 错误：response 没有 choices 属性")
-                print(f"   response 类型: {type(response)}")
-                return "图片描述失败: API响应格式错误"
-            
-            # 检查 choices 是否为空
-            if not response.choices or len(response.choices) == 0:
-                print("❌ [图片描述] 错误：choices 为空")
-                return "图片描述失败: API未返回结果"
-                
-            description = response.choices[0].message.content
-            print(f"🖼️ 图片描述成功，长度: {len(description)}")
-            return description
-            
-        except asyncio.TimeoutError:
-            print("⚠️ 图片描述超时（30秒）")
-            return "图片描述超时"
-        except Exception as e:
-            print(f"❌ 图片描述失败: {e}")
-            return f"图片描述失败: {str(e)}"
-    
-    async def _parallel_rag_retrieve_multiple_images(self, text: str, image_paths: List[str], compressed_paths: List[str] = None) -> List[dict]:
-        """
-        并行执行文本和多张图片的RAG检索
-        
-        Args:
-            text: 文本内容
-            image_paths: 图片文件路径列表（用于描述）
-            compressed_paths: 压缩后的图片路径列表（可选，用于API调用）
-            
-        Returns:
-            合并并去重后的检索结果
-        """
-        tasks = []
-        task_types = []
-        
-        # 如果没有提供压缩路径，使用原始路径
-        if compressed_paths is None:
-            compressed_paths = image_paths
-        
-        # 任务1：文本RAG检索
-        if text:
-            print("📝 启动文本RAG检索任务")
-            tasks.append(self.rag_processor.retrieve_context(text))
-            task_types.append("text")
-        
-        # 任务2-N：每张图片独立的描述 + RAG检索
-        # 注意：这里使用压缩后的图片进行描述，以保证一致性
-        for idx, img_path in enumerate(compressed_paths):
-            if img_path and os.path.exists(img_path):
-                async def image_to_rag(img_path, img_idx):
-                    try:
-                        print(f"🖼️ 启动图片 {img_idx+1}/{len(compressed_paths)} 描述任务")
-                        # 获取图片描述
-                        description = await self._describe_image(img_path)
-                        if description and description not in ["图片描述超时", "图片描述失败"]:
-                            print(f"📝 使用图片 {img_idx+1} 的描述进行RAG检索")
-                            # 使用描述进行RAG检索
-                            return await self.rag_processor.retrieve_context(description)
-                        else:
-                            print(f"⚠️ 图片 {img_idx+1} 描述无效，跳过RAG检索")
-                            return []
-                    except Exception as e:
-                        print(f"❌ 图片 {img_idx+1} RAG检索失败: {e}")
-                        return []
-                
-                tasks.append(image_to_rag(img_path, idx))
-                task_types.append(f"image_{idx+1}")
-        
-        # 如果没有任务，返回空结果
-        if not tasks:
-            return []
-        
-        # 并行执行所有任务
-        print(f"⏳ 并行执行 {len(tasks)} 个RAG检索任务...")
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # 收集所有检索结果
-        all_contexts = []
-        
-        for i, (result, task_type) in enumerate(zip(results, task_types)):
-            if isinstance(result, Exception):
-                print(f"❌ {task_type} 任务失败: {result}")
-                continue
-            
-            if result:
-                all_contexts.extend(result)
-                print(f"✅ {task_type} 检索到 {len(result)} 个文档块")
-        
-        # 去重和排序
-        seen_texts = set()
-        unique_contexts = []
-        for ctx in sorted(all_contexts, key=lambda x: x.get('similarity', 0), reverse=True):
-            # 用前200字符作为去重标识
-            ctx_text = ctx['text'][:200] if 'text' in ctx else str(ctx)[:200]
-            if ctx_text not in seen_texts:
-                unique_contexts.append(ctx)
-                seen_texts.add(ctx_text)
-                # 限制最大文档数
-                if len(unique_contexts) >= self.rag_processor.top_k:
-                    break
-        
-        print(f"✅ 合并去重后得到 {len(unique_contexts)} 个文档块")
-        return unique_contexts
-    
-    async def _parallel_rag_retrieve(self, text: str, image_data: Optional[bytes] = None, image_path: Optional[str] = None) -> tuple:
-        """
-        并行执行文本和图片的RAG检索（保留用于兼容性）
-        
-        Args:
-            text: 文本内容
-            image_data: 图片字节数据
-            image_path: 图片文件路径
-            
-        Returns:
-            (text_contexts, image_contexts) - 分别来自文本和图片描述的检索结果
-        """
-        if image_path:
-            contexts = await self._parallel_rag_retrieve_multiple_images(text, [image_path])
-            # 简单地将结果分成两部分返回（为了兼容）
-            return contexts[:len(contexts)//2], contexts[len(contexts)//2:]
-        else:
-            contexts = await self._parallel_rag_retrieve_multiple_images(text, [])
-            return contexts, []
     
     def _clean_expired_cooldowns(self):
         """清理过期的冷却记录"""
@@ -523,7 +315,6 @@ class AppDayi(commands.Cog):
         base_filename = f"{timestamp}_{user_id}"
         temp_dir = 'app_temp'
         image_paths = []
-        image_data_list = []
         text_path = None
         
         # 提取消息文本
@@ -567,9 +358,6 @@ class AppDayi(commands.Cog):
                 image_path = os.path.join(temp_dir, f"{base_filename}_{idx}{image_extension}")
                 await image_attachment.save(image_path)
                 image_paths.append(image_path)
-                # 同时读取图片数据用于多模态RAG（如果需要）
-                with open(image_path, 'rb') as f:
-                    image_data_list.append(f.read())
             
             if image_attachments:
                 print(f"📸 保存了 {len(image_attachments)} 张图片")
@@ -588,57 +376,15 @@ class AppDayi(commands.Cog):
             
             # 如果有图片，创建压缩任务
             if image_paths:
-                print("🚀 开始并行处理：图片压缩 + RAG检索...")
+                print("🚀 开始并行处理：图片压缩...")
                 parallel_tasks['compress'] = asyncio.gather(
                     *[self._compress_image(path) for path in image_paths]
                 )
             
-            # 根据是否启用RAG系统选择不同的提示词构建方式
-            if self.rag_processor:
-                # 使用RAG系统检索相关内容
-                try:
-                    contexts = []
-                    
-                    # 判断是否有图片
-                    if image_paths:
-                        # 先等待压缩完成，然后使用压缩后的图片进行描述和RAG
-                        if 'compress' in parallel_tasks:
-                            compressed_paths = await parallel_tasks['compress']
-                            print("✅ 图片压缩完成")
-                        
-                        # 新流程：并行处理文本和多张图片（使用压缩后的图片）
-                        print(f"🚀 开始并行RAG检索 - 文本长度: {len(text)}, 图片数量: {len(compressed_paths)}")
-                        contexts = await self._parallel_rag_retrieve_multiple_images(
-                            text=text,
-                            image_paths=image_paths,
-                            compressed_paths=compressed_paths
-                        )
-                    else:
-                        # 纯文本：保持原流程
-                        print(f"📝 开始纯文本检索 - 文本长度: {len(text)}")
-                        contexts = await self.rag_processor.retrieve_context(text)
-                        print(f"✅ RAG文本检索到 {len(contexts)} 个相关文档块")
-                    
-                    if contexts:
-                        # 构建增强的系统提示词
-                        system_prompt = await self.rag_processor.build_enhanced_prompt(
-                            text,  # 始终使用文本构建提示词
-                            contexts
-                        )
-                    else:
-                        # 如果没有检索到相关内容，使用默认提示词
-                        print("⚠️ RAG未检索到相关内容，使用默认提示词")
-                        system_prompt = self._load_default_prompt()
-                except Exception as e:
-                    print(f"❌ RAG检索失败: {e}，回退到默认提示词")
-                    import traceback
-                    traceback.print_exc()
-                    system_prompt = self._load_default_prompt()
-            else:
-                # RAG未启用，使用传统方式加载整个知识库
-                system_prompt = self._load_default_prompt()
+            # 始终使用全量默认提示词（不进行RAG检索）
+            system_prompt = self._load_default_prompt()
             
-            # 如果还没有执行压缩，现在执行（处理没有RAG的情况）
+            # 如果压缩任务尚未等待完成，在这里获取结果
             if image_paths and 'compress' in parallel_tasks and compressed_paths == image_paths:
                 compressed_paths = await parallel_tasks['compress']
                 print("✅ 图片压缩完成")

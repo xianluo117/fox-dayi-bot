@@ -9,6 +9,7 @@ env/
 .env
 .env.*
 !.env.example
+.ruff_cache/
 
 # --- IDEs & Editors ---
 .vscode/
@@ -75,7 +76,6 @@ rag_data/*
 # test scripts
 test_api_response.py
 scripts/*
-!scripts/init_rag.py
 test_assets/
 
 # LuaLS
@@ -86,6 +86,8 @@ xiaozuowen/
 uploaded_prompt/
 rag_prompt/*
 !rag_prompt/.gitkeep
+summary_prompt/*
+!summary_prompt/.gitkeep
 prompt/*
 !prompt/.gitkeep
 # docs
