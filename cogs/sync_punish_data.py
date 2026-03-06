@@ -29,7 +29,7 @@ class SyncPunishDataCog(commands.Cog):
             return None
 
     def init_database(self):
-        """幂等建表，保证跨模块顺序加载安全"""
+        """幂等建表 + 幂等迁移，保证跨模块顺序加载安全"""
         conn = sqlite3.connect('quick_punish.db')
         cursor = conn.cursor()
         cursor.execute('''
@@ -47,9 +47,38 @@ class SyncPunishDataCog(commands.Cog):
                 executor_name TEXT NOT NULL,
                 reason TEXT,
                 removed_roles TEXT,
-                status TEXT DEFAULT 'executed'
+                status TEXT DEFAULT 'executed',
+                source_type TEXT DEFAULT 'local',
+                removed_roles_by_guild TEXT DEFAULT '{}',
+                source_guild_id TEXT
             )
         ''')
+
+        cursor.execute("PRAGMA table_info(quick_punish_records)")
+        cols = {row[1] for row in cursor.fetchall()}
+        if "source_type" not in cols:
+            cursor.execute("ALTER TABLE quick_punish_records ADD COLUMN source_type TEXT DEFAULT 'local'")
+        if "removed_roles_by_guild" not in cols:
+            cursor.execute("ALTER TABLE quick_punish_records ADD COLUMN removed_roles_by_guild TEXT DEFAULT '{}'")
+        if "source_guild_id" not in cols:
+            cursor.execute("ALTER TABLE quick_punish_records ADD COLUMN source_guild_id TEXT")
+
+        cursor.execute("""
+            UPDATE quick_punish_records
+            SET source_type = 'local'
+            WHERE source_type IS NULL OR TRIM(source_type) = ''
+        """)
+        cursor.execute("""
+            UPDATE quick_punish_records
+            SET source_type = 'sync'
+            WHERE status = 'executed' AND (original_message_link IS NULL OR TRIM(original_message_link) = '')
+              AND (removed_roles IS NULL OR TRIM(removed_roles) = '' OR TRIM(removed_roles) = '[]')
+        """)
+        cursor.execute("""
+            UPDATE quick_punish_records
+            SET removed_roles_by_guild = '{}'
+            WHERE removed_roles_by_guild IS NULL OR TRIM(removed_roles_by_guild) = ''
+        """)
         conn.commit()
         conn.close()
 
@@ -99,7 +128,7 @@ class SyncPunishDataCog(commands.Cog):
             if self._already_processed_interface_message(str(message.id)):
                 return
 
-            # 计算下一次处罚计数（以最近 executed 记录为准）
+            # 计算下一次处罚计数（全局递增）
             next_count = self._compute_next_punish_count(punished_user_id_str)
 
             # 执行者信息：使用接口Bot（即消息作者）
@@ -109,7 +138,7 @@ class SyncPunishDataCog(commands.Cog):
             # 时间戳：采用接口消息时间
             ts = message.created_at.isoformat() if message.created_at else datetime.now().isoformat()
 
-            # 写库
+            # 写库（source_type=sync）
             self._insert_record(
                 user_id=punished_user_id_str,
                 user_name="不明",
@@ -122,8 +151,11 @@ class SyncPunishDataCog(commands.Cog):
                 executor_id=executor_id,
                 executor_name=executor_name,
                 reason="同步",
-                removed_roles_json="[]",               # 不恢复任何身份组
-                status="executed"
+                removed_roles_json="[]",
+                removed_roles_by_guild_json="{}",
+                status="executed",
+                source_type="sync",
+                source_guild_id=str(message.guild.id)
             )
 
             print(f"[sync_punish] synced: user_id={punished_user_id_str}, count={next_count}, msg={message.id}")
@@ -148,16 +180,11 @@ class SyncPunishDataCog(commands.Cog):
         cursor = conn.cursor()
         try:
             cursor.execute(
-                "SELECT punish_count FROM quick_punish_records WHERE user_id = ? AND status = 'executed' ORDER BY timestamp DESC LIMIT 1",
+                "SELECT MAX(COALESCE(punish_count, 0)) FROM quick_punish_records WHERE user_id = ? AND status != 'failed'",
                 (user_id,)
             )
             row = cursor.fetchone()
-            if not row:
-                return 1
-            try:
-                last = int(row[0])
-            except Exception:
-                last = 0
+            last = int(row[0]) if row and row[0] is not None else 0
             return max(1, last + 1)
         except Exception:
             return 1
@@ -178,7 +205,10 @@ class SyncPunishDataCog(commands.Cog):
         executor_name: str,
         reason: str,
         removed_roles_json: str,
-        status: str
+        removed_roles_by_guild_json: str,
+        status: str,
+        source_type: str,
+        source_guild_id: Optional[str]
     ):
         conn = sqlite3.connect('quick_punish.db')
         cursor = conn.cursor()
@@ -187,8 +217,9 @@ class SyncPunishDataCog(commands.Cog):
                 '''
                 INSERT INTO quick_punish_records
                 (user_id, user_name, punish_count, timestamp, original_message_id, original_message_link,
-                 channel_id, channel_name, executor_id, executor_name, reason, removed_roles, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 channel_id, channel_name, executor_id, executor_name, reason, removed_roles, status,
+                 source_type, removed_roles_by_guild, source_guild_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 (
                     user_id,
@@ -203,7 +234,10 @@ class SyncPunishDataCog(commands.Cog):
                     executor_name,
                     reason,
                     removed_roles_json,
-                    status
+                    status,
+                    source_type,
+                    removed_roles_by_guild_json,
+                    source_guild_id
                 )
             )
             conn.commit()

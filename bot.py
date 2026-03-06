@@ -3,6 +3,8 @@ from discord.ext import commands
 from discord import app_commands
 import psutil
 import os
+import io
+import sys
 from dotenv import load_dotenv
 from datetime import datetime
 import openai
@@ -10,9 +12,71 @@ import asyncio
 import mimetypes
 import base64
 import sqlite3
+from collections import deque
 from cogs.logger import log_slash_command
 
 load_dotenv()
+
+TERMINAL_LOG_BUFFER_MAX = 5000
+terminal_log_buffer = deque(maxlen=TERMINAL_LOG_BUFFER_MAX)
+
+
+class TerminalLogCapture:
+    """将终端输出同时写入原始流，并缓存最近的日志行。"""
+
+    def __init__(self, original_stream, buffer: deque):
+        self.original_stream = original_stream
+        self.buffer = buffer
+        self._pending = ""
+
+    def write(self, data):
+        if not isinstance(data, str):
+            data = str(data)
+
+        written = self.original_stream.write(data)
+        self._capture(data)
+        return written if written is not None else len(data)
+
+    def flush(self):
+        self.original_stream.flush()
+
+    def _capture(self, data: str):
+        self._pending += data.replace("\r\n", "\n").replace("\r", "\n")
+
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            self.buffer.append(line)
+
+    def get_pending_line(self) -> str:
+        return self._pending
+
+    def __getattr__(self, name):
+        return getattr(self.original_stream, name)
+
+
+def setup_terminal_log_capture():
+    """捕获 stdout/stderr，便于通过命令导出最近终端日志。"""
+    if not isinstance(sys.stdout, TerminalLogCapture):
+        sys.stdout = TerminalLogCapture(sys.stdout, terminal_log_buffer)
+    if not isinstance(sys.stderr, TerminalLogCapture):
+        sys.stderr = TerminalLogCapture(sys.stderr, terminal_log_buffer)
+
+
+def get_recent_terminal_logs(limit: int = 100) -> list[str]:
+    """获取最近的终端日志。"""
+    limit = max(1, min(limit, 1000))
+    logs = list(terminal_log_buffer)
+
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, TerminalLogCapture):
+            pending_line = stream.get_pending_line()
+            if pending_line:
+                logs.append(pending_line)
+
+    return logs[-limit:]
+
+
+setup_terminal_log_capture()
 
 # 从 .env 文件加载配置
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -254,10 +318,7 @@ def refund_quota(interaction: discord.Interaction, amount: int = 1):
 
 def is_admin(interaction: discord.Interaction) -> bool:
     """检查用户是否为管理员"""
-    # 某些情况下（例如 on_ready 之前）bot.admins 可能尚未初始化。
-    # 使用 getattr 提供安全默认值，避免 Check 阶段抛异常导致 “该应用程序未响应”。
-    admins = getattr(bot, "admins", [])
-    return interaction.user.id in admins
+    return interaction.user.id in bot.admins
 
 def is_admin_or_trusted(interaction: discord.Interaction) -> bool:
     """检查用户是否为管理员或受信任用户"""
@@ -398,10 +459,13 @@ async def on_ready():
         print(f' ❌ 同步命令失败: {e}')
 
 @bot.tree.command(name='ping', description='显示机器人延迟和系统信息')
-@app_commands.check(is_admin)
-@app_commands.check(deduct_quota_no_time_update)
 async def ping(interaction: discord.Interaction):
     """显示延迟、内存使用率、CPU使用率等系统信息"""
+    if not is_admin(interaction):
+        await interaction.response.send_message('❌ 此命令仅限管理员使用。', ephemeral=True)
+        log_slash_command(interaction, False)
+        return
+
     # 计算延迟
     latency = round(bot.latency * 1000, 2)
     
@@ -426,6 +490,38 @@ async def ping(interaction: discord.Interaction):
     )
     
     await interaction.response.send_message(embed=embed)
+    log_slash_command(interaction, True)
+
+
+@bot.tree.command(name='看看日志', description='导出最近打印到终端的日志')
+@app_commands.describe(条数='要导出的最近日志条数，默认100，最大1000')
+async def view_logs(interaction: discord.Interaction, 条数: app_commands.Range[int, 1, 1000] = 100):
+    """将最近的终端日志导出为 txt 附件，并以私密消息发送。"""
+    if not is_admin(interaction):
+        await interaction.response.send_message('❌ 此命令仅限管理员使用。', ephemeral=True)
+        log_slash_command(interaction, False)
+        return
+
+    recent_logs = get_recent_terminal_logs(条数)
+
+    if not recent_logs:
+        await interaction.response.send_message('⚠️ 当前还没有可导出的终端日志。', ephemeral=True)
+        log_slash_command(interaction, True)
+        return
+
+    export_time = datetime.now()
+    file_name = f"terminal_logs_{export_time.strftime('%Y%m%d_%H%M%S')}.txt"
+    file_content = (
+        f"导出时间: {export_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"请求用户: {interaction.user} ({interaction.user.id})\n"
+        f"日志条数: {len(recent_logs)}\n"
+        + "=" * 60 + "\n"
+        + "\n".join(recent_logs)
+        + "\n"
+    )
+
+    log_file = discord.File(io.BytesIO(file_content.encode('utf-8')), filename=file_name)
+    await interaction.response.send_message(content=f'📄 已为你准备最近 {len(recent_logs)} 条终端日志，见附件下载。', file=log_file, ephemeral=True)
     log_slash_command(interaction, True)
 
 

@@ -5,7 +5,7 @@ import os
 import sqlite3
 from datetime import datetime
 import json
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any
 import aiofiles
 from dotenv import load_dotenv
 import io
@@ -154,8 +154,10 @@ class QuickPunishConfirmView(discord.ui.View):
                         'revoked': '↩️'
                     }.get(record['status'], '❓')
 
+                    source_tag = f"[{record.get('source_type', 'local')}]"
+
                     history_lines.append(
-                        f"{status_emoji} **第{record['punish_count']}次** - {time_str}\n"
+                        f"{status_emoji} {source_tag} **第{record['punish_count']}次** - {time_str}\n"
                         f"   原因: {record['reason'][:30]}{'...' if len(record['reason']) > 30 else ''}\n"
                         f"   执行者: {record['executor_name']}"
                     )
@@ -185,6 +187,62 @@ class QuickPunishConfirmView(discord.ui.View):
             timestamp=datetime.now()
         )
         await interaction.edit_original_response(embed=embed, view=None)
+
+
+class RevokeConfirmView(discord.ui.View):
+    """撤销二次确认：当最近记录是sync时，确认是否回溯撤销local记录"""
+
+    def __init__(self, cog, target_user_id: str, latest_record: Dict[str, Any], revoke_record: Dict[str, Any]):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.target_user_id = target_user_id
+        self.latest_record = latest_record
+        self.revoke_record = revoke_record
+
+    async def safe_defer(self, interaction: discord.Interaction):
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
+    def _disable_all(self):
+        for child in self.children:
+            try:
+                child.disabled = True
+            except Exception:
+                pass
+
+    @discord.ui.button(label="确认继续撤销", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.safe_defer(interaction)
+        self._disable_all()
+
+        success, message = await self.cog._execute_revoke_record(
+            interaction=interaction,
+            user_id=self.target_user_id,
+            record=self.revoke_record
+        )
+
+        result_embed = discord.Embed(
+            title="✅ 撤销完成" if success else "❌ 撤销失败",
+            description=message,
+            color=discord.Color.green() if success else discord.Color.red(),
+            timestamp=datetime.now()
+        )
+        await interaction.edit_original_response(embed=result_embed, view=None)
+
+    @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.safe_defer(interaction)
+        self._disable_all()
+        embed = discord.Embed(
+            title="操作已取消",
+            description="本次撤销未执行。",
+            color=discord.Color.greyple(),
+            timestamp=datetime.now()
+        )
+        await interaction.edit_original_response(embed=embed, view=None)
+
+    async def on_timeout(self):
+        self._disable_all()
 
 
 class TemplateSelect(discord.ui.Select):
@@ -243,20 +301,27 @@ class QuickPunishCog(commands.Cog):
     
     def __init__(self, bot):
         self.bot = bot
-        self.init_database()
-        
+
         # 从环境变量加载配置
         self.enabled = os.getenv("QUICK_PUNISH_ENABLED", "false").lower() == "true"
+        self.sync_config_path = os.path.join("cogs", "config", "quick_punish_sync.json")
         self.allowed_roles = self._parse_role_ids(os.getenv("QUICK_PUNISH_ROLES", ""))
         self.remove_roles = self._parse_role_ids(os.getenv("QUICK_PUNISH_REMOVE_ROLES", ""))
         self.log_channel_id = self._parse_channel_id(os.getenv("QUICK_PUNISH_LOG_CHANNEL"))
-        self.log_thread_id = self._parse_channel_id(os.getenv("QUICK_PUNISH_LOG_THREAD"))  # 新增：子区ID
+        self.log_thread_id = self._parse_channel_id(os.getenv("QUICK_PUNISH_LOG_THREAD"))
         self.interface_channel_id = self._parse_channel_id(os.getenv("QUICK_PUNISH_INTERFACE_CHANNEL"))
         self.appeal_channel_id = self._parse_channel_id(os.getenv("QUICK_PUNISH_APPEAL_CHANNEL"))
+
+        # 双服同步配置（JSON优先，env作为兼容fallback）
+        self.sync_config = self._load_sync_config()
+
+        # 数据库初始化与迁移
+        self.init_database()
 
         # 加载xiaozuowen目录中的txt模板（不硬编码文件名）
         self.dm_templates: Dict[str, str] = {}
         self._load_dm_templates()
+
     
     def _parse_role_ids(self, role_str: str) -> List[int]:
         """解析身份组ID字符串"""
@@ -277,6 +342,89 @@ class QuickPunishCog(commands.Cog):
         except ValueError:
             print(f"警告：无法解析频道ID: {channel_str}")
             return None
+
+    def _load_sync_config(self) -> Dict[str, Any]:
+        """加载并校验双服同步配置"""
+        default_config: Dict[str, Any] = {
+            "version": 1,
+            "sync_guild_ids": [],
+            "guilds": {},
+            "policy": {"mode": "best_effort"}
+        }
+
+        if not os.path.exists(self.sync_config_path):
+            print(f"警告：未找到同步配置文件 {self.sync_config_path}，将回退到env配置")
+            return default_config
+
+        try:
+            with open(self.sync_config_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception as e:
+            print(f"警告：读取同步配置失败: {e}")
+            return default_config
+
+        if not isinstance(raw, dict):
+            print("警告：quick_punish_sync.json 顶层必须是对象")
+            return default_config
+
+        sync_ids: List[str] = []
+        for gid in raw.get("sync_guild_ids", []):
+            try:
+                sync_ids.append(str(int(str(gid).strip())))
+            except Exception:
+                print(f"警告：sync_guild_ids 中存在无效guild id: {gid}")
+
+        guild_cfg_raw = raw.get("guilds", {}) if isinstance(raw.get("guilds", {}), dict) else {}
+        guilds: Dict[str, Dict[str, List[int]]] = {}
+        for gid, cfg in guild_cfg_raw.items():
+            gid_str = str(gid).strip()
+            if not gid_str:
+                continue
+            if not isinstance(cfg, dict):
+                cfg = {}
+            allowed_raw = cfg.get("allowed_roles", [])
+            remove_raw = cfg.get("punish_remove_roles", [])
+            guilds[gid_str] = {
+                "allowed_roles": [int(x) for x in allowed_raw if str(x).strip().isdigit()] if isinstance(allowed_raw, list) else [],
+                "punish_remove_roles": [int(x) for x in remove_raw if str(x).strip().isdigit()] if isinstance(remove_raw, list) else []
+            }
+
+        if not sync_ids:
+            print("警告：quick_punish_sync.json 的 sync_guild_ids 为空，将仅处理触发服务器")
+
+        for gid in sync_ids:
+            if gid not in guilds:
+                guilds[gid] = {"allowed_roles": [], "punish_remove_roles": []}
+                print(f"警告：同步服 {gid} 未配置 guilds 块，已按空配置处理")
+
+        policy = raw.get("policy", {}) if isinstance(raw.get("policy", {}), dict) else {}
+        mode = str(policy.get("mode", "best_effort")).strip().lower() or "best_effort"
+        if mode != "best_effort":
+            print(f"警告：当前仅支持 best_effort，收到 {mode}，将回退为 best_effort")
+            mode = "best_effort"
+
+        return {
+            "version": int(raw.get("version", 1)) if str(raw.get("version", "1")).isdigit() else 1,
+            "sync_guild_ids": sync_ids,
+            "guilds": guilds,
+            "policy": {"mode": mode}
+        }
+
+    def _get_sync_guild_ids(self, trigger_guild_id: Optional[int] = None) -> List[str]:
+        ids = list(self.sync_config.get("sync_guild_ids", []))
+        if trigger_guild_id is not None:
+            gid = str(trigger_guild_id)
+            if gid not in ids:
+                ids.append(gid)
+        if not ids and trigger_guild_id is not None:
+            return [str(trigger_guild_id)]
+        return ids
+
+    def _get_guild_sync_config(self, guild_id: int) -> Dict[str, List[int]]:
+        cfg = self.sync_config.get("guilds", {}).get(str(guild_id), {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        return {"allowed_roles": cfg.get("allowed_roles", []), "punish_remove_roles": cfg.get("punish_remove_roles", [])}
     
     def _load_dm_templates(self):
         """扫描xiaozuowen目录，加载所有txt模板文件名 -> 路径"""
@@ -291,10 +439,10 @@ class QuickPunishCog(commands.Cog):
             print(f"加载DM模板失败: {e}")
 
     def init_database(self):
-        """初始化数据库"""
+        """初始化数据库并执行幂等迁移"""
         conn = sqlite3.connect('quick_punish.db')
         cursor = conn.cursor()
-        
+
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS quick_punish_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -310,51 +458,129 @@ class QuickPunishCog(commands.Cog):
                 executor_name TEXT NOT NULL,
                 reason TEXT,
                 removed_roles TEXT,
-                status TEXT DEFAULT 'executed'
+                status TEXT DEFAULT 'executed',
+                source_type TEXT DEFAULT 'local',
+                removed_roles_by_guild TEXT DEFAULT '{}',
+                source_guild_id TEXT
             )
         ''')
-        
+
+        cursor.execute("PRAGMA table_info(quick_punish_records)")
+        cols = {row[1] for row in cursor.fetchall()}
+        if "source_type" not in cols:
+            cursor.execute("ALTER TABLE quick_punish_records ADD COLUMN source_type TEXT DEFAULT 'local'")
+        if "removed_roles_by_guild" not in cols:
+            cursor.execute("ALTER TABLE quick_punish_records ADD COLUMN removed_roles_by_guild TEXT DEFAULT '{}'")
+        if "source_guild_id" not in cols:
+            cursor.execute("ALTER TABLE quick_punish_records ADD COLUMN source_guild_id TEXT")
+
+        cursor.execute("""
+            UPDATE quick_punish_records
+            SET source_type = 'local'
+            WHERE source_type IS NULL OR TRIM(source_type) = ''
+        """)
+        cursor.execute("""
+            UPDATE quick_punish_records
+            SET source_type = 'sync'
+            WHERE status = 'executed'
+              AND (original_message_link IS NULL OR TRIM(original_message_link) = '')
+              AND (removed_roles IS NULL OR TRIM(removed_roles) = '' OR TRIM(removed_roles) = '[]')
+        """)
+        cursor.execute("""
+            UPDATE quick_punish_records
+            SET removed_roles_by_guild = '{}'
+            WHERE removed_roles_by_guild IS NULL OR TRIM(removed_roles_by_guild) = ''
+        """)
+
         conn.commit()
         conn.close()
-    
+
     def has_permission(self, interaction: discord.Interaction) -> bool:
-        """检查用户是否有快速处罚权限"""
+        """检查用户是否有快速处罚权限（仅校验触发服allowed_roles）"""
         if not self.enabled:
             return False
-        
-        if not self.allowed_roles:
+
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return False
-        
+
+        guild_cfg = self._get_guild_sync_config(interaction.guild.id)
+        allowed_roles = guild_cfg.get("allowed_roles", []) or self.allowed_roles
+        if not allowed_roles:
+            return False
+
         user_roles = [role.id for role in interaction.user.roles]
-        return any(role_id in user_roles for role_id in self.allowed_roles)
-    
+        return any(role_id in user_roles for role_id in allowed_roles)
+
+    def _parse_json_list(self, value: Any) -> List[int]:
+        if isinstance(value, list):
+            return [int(x) for x in value if str(x).strip().isdigit()]
+        if value is None:
+            return []
+        try:
+            loaded = json.loads(value) if isinstance(value, str) else value
+            if isinstance(loaded, list):
+                return [int(x) for x in loaded if str(x).strip().isdigit()]
+        except Exception:
+            pass
+        return []
+
+    def _parse_json_roles_by_guild(self, value: Any) -> Dict[str, List[int]]:
+        if value is None:
+            return {}
+        try:
+            loaded = json.loads(value) if isinstance(value, str) else value
+        except Exception:
+            loaded = {}
+
+        if not isinstance(loaded, dict):
+            return {}
+
+        result: Dict[str, List[int]] = {}
+        for gid, roles in loaded.items():
+            gid_str = str(gid).strip()
+            if not gid_str:
+                continue
+            result[gid_str] = self._parse_json_list(roles)
+        return result
+
+    def _compute_next_punish_count_with_cursor(self, cursor: sqlite3.Cursor, user_id: str) -> int:
+        cursor.execute(
+            "SELECT MAX(COALESCE(punish_count, 0)) FROM quick_punish_records WHERE user_id = ? AND status != 'failed'",
+            (user_id,)
+        )
+        row = cursor.fetchone()
+        last = 0
+        if row and row[0] is not None:
+            try:
+                last = int(row[0])
+            except Exception:
+                last = 0
+        return max(1, last + 1)
+
     async def get_punish_count(self, user_id: str) -> int:
-        """获取用户被处罚次数"""
+        """获取用户被处罚次数（executed）"""
         conn = sqlite3.connect('quick_punish.db')
         cursor = conn.cursor()
-        
         cursor.execute(
             "SELECT COUNT(*) FROM quick_punish_records WHERE user_id = ? AND status = 'executed'",
             (user_id,)
         )
         count = cursor.fetchone()[0]
-        
         conn.close()
         return count
-    
+
     async def get_user_punishment_history(self, user_id: str, limit: int = 5) -> List[Dict]:
         """获取用户的处罚历史记录"""
         conn = sqlite3.connect('quick_punish.db')
         cursor = conn.cursor()
-        
         cursor.execute('''
-            SELECT id, punish_count, timestamp, reason, executor_name, status
+            SELECT id, punish_count, timestamp, reason, executor_name, status, source_type
             FROM quick_punish_records
             WHERE user_id = ?
-            ORDER BY timestamp DESC
+            ORDER BY timestamp DESC, id DESC
             LIMIT ?
         ''', (user_id, limit))
-        
+
         records = []
         for row in cursor.fetchall():
             records.append({
@@ -363,12 +589,12 @@ class QuickPunishCog(commands.Cog):
                 'timestamp': row[2],
                 'reason': row[3],
                 'executor_name': row[4],
-                'status': row[5]
+                'status': row[5],
+                'source_type': row[6] or 'local'
             })
-        
         conn.close()
         return records
-    
+
     async def send_dm(self, user: discord.User, message_content: str) -> bool:
         """发送私信给用户"""
         try:
@@ -408,66 +634,74 @@ class QuickPunishCog(commands.Cog):
     
     async def log_to_database_with_count(self, user: discord.User, message: discord.Message,
                                         executor: discord.User, reason: str, removed_roles: List[int],
-                                        punish_count: int, status: str = "executed") -> int:
+                                        punish_count: int, status: str = "executed",
+                                        source_type: str = "local",
+                                        removed_roles_by_guild: Optional[Dict[str, List[int]]] = None,
+                                        source_guild_id: Optional[str] = None) -> Tuple[int, int]:
         """记录处罚信息到数据库（使用事务确保原子性）"""
         conn = sqlite3.connect('quick_punish.db')
         conn.isolation_level = None  # 自动提交模式
         cursor = conn.cursor()
-        
+
         try:
-            # 开始事务
             cursor.execute("BEGIN TRANSACTION")
-            
-            # 如果没有提供punish_count，则查询并计算
+
             if punish_count == 0:
-                cursor.execute(
-                    "SELECT COUNT(*) FROM quick_punish_records WHERE user_id = ? AND status = 'executed'",
-                    (str(user.id),)
-                )
-                punish_count = cursor.fetchone()[0] + 1
-            
-            message_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{message.id}"
-            
-            # 插入新记录，包含punish_count
+                punish_count = self._compute_next_punish_count_with_cursor(cursor, str(user.id))
+
+            message_link = None
+            msg_id = None
+            channel_id = None
+            channel_name = None
+            if message:
+                msg_id = str(message.id)
+                channel_id = str(message.channel.id)
+                channel_name = getattr(message.channel, "name", None)
+                if message.guild and message.channel:
+                    message_link = f"https://discord.com/channels/{message.guild.id}/{message.channel.id}/{message.id}"
+
+            rrbg = removed_roles_by_guild or {}
             cursor.execute('''
                 INSERT INTO quick_punish_records
                 (user_id, user_name, punish_count, timestamp, original_message_id, original_message_link,
-                 channel_id, channel_name, executor_id, executor_name, reason, removed_roles, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 channel_id, channel_name, executor_id, executor_name, reason, removed_roles, status,
+                 source_type, removed_roles_by_guild, source_guild_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 str(user.id),
                 user.name,
-                punish_count,  # 插入实际的处罚次数
+                punish_count,
                 datetime.now().isoformat(),
-                str(message.id),
+                msg_id,
                 message_link,
-                str(message.channel.id),
-                message.channel.name,
+                channel_id,
+                channel_name,
                 str(executor.id),
                 executor.name,
                 reason,
                 json.dumps(removed_roles),
-                status
+                status,
+                source_type,
+                json.dumps(rrbg, ensure_ascii=False),
+                source_guild_id
             ))
-            
+
             record_id = cursor.lastrowid
-            
-            # 提交事务
             cursor.execute("COMMIT")
-            
             return record_id, punish_count
-            
+
         except Exception as e:
-            # 回滚事务
             cursor.execute("ROLLBACK")
             print(f"数据库事务错误: {e}")
             raise
         finally:
             conn.close()
-    
-    async def send_log_embed(self, channel: discord.TextChannel, user: discord.User,
+
+    async def send_log_embed(self, channel: discord.abc.Messageable, user: discord.User,
                             executor: discord.User, reason: str, message_link: str,
                             removed_roles: List[int], record_id: int,
+                            trigger_guild: Optional[discord.Guild] = None,
+                            sync_results: Optional[List[Dict[str, Any]]] = None,
                             original_message: discord.Message = None):
         """发送日志Embed到指定频道，并转发原消息"""
         embed = discord.Embed(
@@ -475,29 +709,48 @@ class QuickPunishCog(commands.Cog):
             color=discord.Color.red(),
             timestamp=datetime.now()
         )
-        
+
         embed.add_field(name="处罚对象", value=f"{user.mention} ({user.id})", inline=False)
         embed.add_field(name="执行者", value=f"{executor.mention}", inline=True)
         embed.add_field(name="原因", value=reason, inline=True)
-        embed.add_field(name="原消息", value=f"[跳转到消息]({message_link})", inline=False)
-        
+        if message_link:
+            embed.add_field(name="原消息", value=f"[跳转到消息]({message_link})", inline=False)
+
+        if trigger_guild:
+            embed.add_field(
+                name="触发服务器",
+                value=f"{trigger_guild.name} ({trigger_guild.id})",
+                inline=False
+            )
+
         if removed_roles:
-            guild = channel.guild
             roles_str = ", ".join([f"<@&{role_id}>" for role_id in removed_roles])
-            embed.add_field(name="移除的身份组", value=roles_str, inline=False)
-        
+            embed.add_field(name="触发服移除身份组", value=roles_str, inline=False)
+
+        if sync_results:
+            detail_lines = []
+            for result in sync_results:
+                gname = result.get("guild_name", "未知服务器")
+                gid = result.get("guild_id", "-")
+                if result.get("success"):
+                    role_text = ", ".join([f"<@&{rid}>" for rid in result.get("removed_roles", [])]) or "无"
+                    detail_lines.append(f"✅ {gname} ({gid})\n移除: {role_text}")
+                else:
+                    detail_lines.append(f"❌ {gname} ({gid})\n原因: {result.get('error', '未知错误')}")
+
+            if detail_lines:
+                embed.add_field(name="双服执行明细", value="\n\n".join(detail_lines)[:1024], inline=False)
+
         embed.set_footer(text=f"记录ID: {record_id}")
-        
+
         try:
-            # 发送日志Embed
             await channel.send(embed=embed)
-            
-            # 尝试转发原消息
+
             if original_message:
                 await self._forward_original_message(channel, original_message, user)
         except Exception as e:
             print(f"发送日志Embed时出错: {e}")
-    
+
     async def _forward_original_message(self, channel: discord.TextChannel,
                                        message: discord.Message,
                                        punished_user: discord.User):
@@ -593,6 +846,77 @@ class QuickPunishCog(commands.Cog):
             )
             await channel.send(embed=error_embed)
     
+    async def _resolve_member_in_guild(self, guild: discord.Guild, user_id: int) -> Optional[discord.Member]:
+        member = guild.get_member(user_id)
+        if member:
+            return member
+        try:
+            return await guild.fetch_member(user_id)
+        except Exception:
+            return None
+
+    async def _execute_role_removal_in_guild(self, guild_id: str,
+                                             target_user_id: int,
+                                             trigger_guild_id: Optional[int] = None) -> Dict[str, Any]:
+        result = {
+            "guild_id": guild_id,
+            "guild_name": guild_id,
+            "success": False,
+            "removed_roles": [],
+            "error": None
+        }
+
+        if not str(guild_id).isdigit():
+            result["error"] = "无效guild id"
+            return result
+
+        guild = self.bot.get_guild(int(guild_id))
+        if not guild:
+            result["error"] = "机器人不在该服务器或缓存未命中"
+            return result
+
+        result["guild_name"] = guild.name
+        member = await self._resolve_member_in_guild(guild, target_user_id)
+        if not member:
+            result["error"] = "用户不在该服务器"
+            return result
+
+        guild_cfg = self._get_guild_sync_config(guild.id)
+        configured_remove_roles = guild_cfg.get("punish_remove_roles", [])
+        if not configured_remove_roles and trigger_guild_id is not None and str(guild.id) == str(trigger_guild_id):
+            configured_remove_roles = self.remove_roles
+
+        if not configured_remove_roles:
+            result["error"] = "该服务器未配置可移除身份组"
+            return result
+
+        user_role_ids = [role.id for role in member.roles]
+        roles_to_remove = [role_id for role_id in configured_remove_roles if role_id in user_role_ids]
+        if not roles_to_remove:
+            result["error"] = "用户未拥有配置中的可移除身份组"
+            return result
+
+        try:
+            removed_roles, removal_success = await self.remove_user_roles(member, roles_to_remove)
+            if not removal_success:
+                result["error"] = "用户未拥有需要移除的身份组（可能已被其他管理员处罚）"
+                return result
+            result["success"] = True
+            result["removed_roles"] = removed_roles
+            return result
+        except Exception as e:
+            result["error"] = str(e)
+            return result
+
+    def _format_sync_results(self, results: List[Dict[str, Any]]) -> str:
+        lines = []
+        for item in results:
+            if item.get("success"):
+                lines.append(f"✅ {item.get('guild_name')}：移除{len(item.get('removed_roles', []))}个身份组")
+            else:
+                lines.append(f"❌ {item.get('guild_name')}：{item.get('error', '未知错误')}")
+        return "\n".join(lines) if lines else "无执行结果"
+
     async def execute_punishment(self, interaction: discord.Interaction,
                                 target_user: discord.User,
                                 target_message: discord.Message,
@@ -600,101 +924,104 @@ class QuickPunishCog(commands.Cog):
                                 executor: discord.User,
                                 dm_template_filename: Optional[str] = None) -> tuple[bool, str, List[Dict]]:
         """执行处罚的主要逻辑，返回(成功状态, 消息, 处罚历史)"""
-        guild = interaction.guild
-        
-        # 检查用户是否在服务器中
-        member = guild.get_member(target_user.id)
-        if not member:
-            return False, "用户不在服务器中", []
-        
-        # 检查用户是否拥有需要移除的身份组
-        user_role_ids = [role.id for role in member.roles]
-        roles_to_remove = [role_id for role_id in self.remove_roles if role_id in user_role_ids]
-        
-        if not roles_to_remove:
-            return False, "用户未拥有需要移除的身份组，操作已取消", []
-        
+        trigger_guild = interaction.guild
+        if trigger_guild is None:
+            return False, "无法识别触发服务器", []
+
+        sync_guild_ids = self._get_sync_guild_ids(trigger_guild.id)
+        sync_results: List[Dict[str, Any]] = []
+
         try:
-            # 移除身份组（在最后一刻检查）
-            removed_roles, removal_success = await self.remove_user_roles(member, roles_to_remove)
-            
-            # 如果没有成功移除任何身份组，说明用户可能已被其他管理员处罚
-            if not removal_success:
-                return False, "用户未拥有需要移除的身份组（可能已被其他管理员处罚），操作已取消", []
-            
-            # 使用事务记录到数据库并获取处罚次数
+            for guild_id in sync_guild_ids:
+                sync_results.append(
+                    await self._execute_role_removal_in_guild(
+                        guild_id, target_user.id, trigger_guild_id=trigger_guild.id
+                    )
+                )
+
+            success_results = [r for r in sync_results if r.get("success")]
+            if not success_results:
+                return False, f"处罚失败：双服均未成功执行\n{self._format_sync_results(sync_results)}", []
+
+            removed_roles_by_guild = {
+                str(r["guild_id"]): r.get("removed_roles", [])
+                for r in success_results if r.get("removed_roles")
+            }
+            trigger_removed_roles = removed_roles_by_guild.get(str(trigger_guild.id), [])
+
             record_id, punish_count = await self.log_to_database_with_count(
                 user=target_user,
                 message=target_message,
                 executor=executor,
                 reason=reason,
-                removed_roles=removed_roles,
-                punish_count=0,  # 传0让方法自动计算
-                status="executed"
+                removed_roles=trigger_removed_roles,
+                punish_count=0,
+                status="executed",
+                source_type="local",
+                removed_roles_by_guild=removed_roles_by_guild,
+                source_guild_id=str(trigger_guild.id)
             )
-            
-            # 构建私信内容（使用所选模板文件）
+
             dm_content = await self._build_dm_content(
                 target_message=target_message,
                 reason=reason,
                 executor=executor,
                 punish_count=punish_count,
-                dm_template_filename=dm_template_filename
+                dm_template_filename=dm_template_filename,
+                removal_results=success_results
             )
-            
-            # 发送私信（失败不影响后续流程）
             dm_sent = await self.send_dm(target_user, dm_content)
-            
-            # 发送通知到原频道
+
             await self._send_channel_notification(
                 channel=target_message.channel,
                 user=target_user,
                 executor=executor,
                 reason=reason,
-                removed_roles=removed_roles
+                removed_roles=trigger_removed_roles
             )
-            
-            # 发送 public.txt 内容
+
             try:
                 async with aiofiles.open('xiaozuowen/public.txt', 'r', encoding='utf-8') as f:
                     public_content = await f.read()
                 await target_message.channel.send(public_content.strip())
             except Exception as e:
                 print(f"发送public.txt内容失败: {e}")
-            
-            # 发送到日志频道或子区
-            log_destination = await self._get_log_destination(guild)
+
+            log_destination = await self._get_log_destination()
             if log_destination:
-                message_link = f"https://discord.com/channels/{guild.id}/{target_message.channel.id}/{target_message.id}"
+                message_link = f"https://discord.com/channels/{trigger_guild.id}/{target_message.channel.id}/{target_message.id}"
                 await self.send_log_embed(
                     channel=log_destination,
                     user=target_user,
                     executor=executor,
                     reason=reason,
                     message_link=message_link,
-                    removed_roles=removed_roles,
+                    removed_roles=trigger_removed_roles,
                     record_id=record_id,
+                    trigger_guild=trigger_guild,
+                    sync_results=sync_results,
                     original_message=target_message
                 )
-            
-            # 发送到对接频道
+
             if self.interface_channel_id:
-                interface_channel = guild.get_channel(self.interface_channel_id)
-                if interface_channel:
-                    await interface_channel.send(f'{{"punish": {target_user.id}}}')
-            
-            # 获取用户的处罚历史记录
+                try:
+                    interface_channel = self.bot.get_channel(self.interface_channel_id)
+                    if interface_channel:
+                        await interface_channel.send(f'{{"punish": {target_user.id}}}')
+                    else:
+                        print("警告：未找到 QUICK_PUNISH_INTERFACE_CHANNEL，已跳过接口发送")
+                except Exception as e:
+                    print(f"警告：接口频道发送失败（不影响主流程）: {e}")
+
             punishment_history = await self.get_user_punishment_history(str(target_user.id))
-            
-            success_msg = f"用户 {target_user.mention} 已被处罚（第{punish_count}次）"
+            success_msg = f"用户 {target_user.mention} 已被处罚（第{punish_count}次，全局）\n{self._format_sync_results(sync_results)}"
             if not dm_sent:
                 success_msg += "\n⚠️ 注意：私信发送失败（用户可能关闭了私信）"
-            
+
             return True, success_msg, punishment_history
-            
+
         except Exception as e:
             print(f"执行处罚时出错: {e}")
-            # 记录失败状态
             try:
                 await self.log_to_database_with_count(
                     user=target_user,
@@ -703,19 +1030,52 @@ class QuickPunishCog(commands.Cog):
                     reason=reason,
                     removed_roles=[],
                     punish_count=0,
-                    status="failed"
+                    status="failed",
+                    source_type="local",
+                    removed_roles_by_guild={},
+                    source_guild_id=str(trigger_guild.id)
                 )
-            except:
-                pass  # 如果记录失败状态也失败，则忽略
+            except Exception:
+                pass
             return False, f"执行处罚时出错：{str(e)}", []
     
     async def _build_dm_content(self, target_message: discord.Message,
                                reason: str, executor: discord.User,
                                punish_count: int,
-                               dm_template_filename: Optional[str] = None) -> str:
+                               dm_template_filename: Optional[str] = None,
+                               removal_results: Optional[List[Dict[str, Any]]] = None) -> str:
         """构建私信内容"""
         # 读取3rd.txt文件内容
         third_content = "请重新完成新人验证答题。"  # 默认内容
+
+        # 构建“服务器 + 被移除身份组”说明
+        server_role_parts: List[str] = []
+        for item in (removal_results or []):
+            if not item.get("success"):
+                continue
+
+            guild_id = str(item.get("guild_id", "")).strip()
+            guild_name = item.get("guild_name", "未知服务器")
+            removed_role_ids = self._parse_json_list(item.get("removed_roles", []))
+
+            role_names: List[str] = []
+            guild_obj = self.bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+            for role_id in removed_role_ids:
+                role_name = None
+                if guild_obj:
+                    role_obj = guild_obj.get_role(role_id)
+                    if role_obj:
+                        role_name = f"@{role_obj.name}"
+                if not role_name:
+                    role_name = f"ID:{role_id}"
+                role_names.append(role_name)
+
+            roles_text = "、".join(role_names) if role_names else "无可展示身份组"
+            server_role_parts.append(f"{guild_name}（{roles_text}）")
+
+        server_role_text = "，".join(server_role_parts) if server_role_parts else "未记录到具体服务器与身份组"
+        confirm_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
         # 使用选择的模板文件（来自xiaozuowen目录）
         try:
             if dm_template_filename and dm_template_filename in getattr(self, "dm_templates", {}):
@@ -728,18 +1088,15 @@ class QuickPunishCog(commands.Cog):
         # 构建完整私信
         dm_parts = [
             "# === 答题处罚通知 ===\n",
-            "你已被要求重新答题。",
-            f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"频道：#{target_message.channel.name}",
-            f"原因：{reason}",
-            f"执行者：{executor.name}\n",
+            f"你在以下服务器的一些身份组已被移除：{server_role_text}。原因：{reason}\n",
+            f"此处罚在{confirm_time}由{executor.name}确认。\n",
             third_content.strip(),
             "\n请仔细阅读以上内容和社区规则，重新完成新人验证答题。"
         ]
         
         # 添加申诉信息
         if self.appeal_channel_id:
-            dm_parts.append("\n# 请勿回复此信息。如有异议，请联系管理员。")
+            dm_parts.append("\n## 请勿回复此信息。\n\n如有异议，请**不要**私信联系处罚执行者或管理员；请使用 https://discord.com/channels/1134557553011998840/1284458379615666269 开ticket向管理组反馈。")
         
         return "\n".join(dm_parts)
     
@@ -769,21 +1126,20 @@ class QuickPunishCog(commands.Cog):
     
     async def get_recent_punishments(self, count: int = 3, max_count: int = 1000) -> List[Dict]:
         """获取最近的处罚记录"""
-        # 确保count在合理范围内
         count = min(count, max_count)
         count = max(count, 1)
-        
+
         conn = sqlite3.connect('quick_punish.db')
         cursor = conn.cursor()
-        
+
         cursor.execute('''
             SELECT id, user_id, user_name, timestamp, channel_name,
-                   executor_name, reason, removed_roles, status
+                   executor_name, reason, removed_roles, status, source_type
             FROM quick_punish_records
-            ORDER BY timestamp DESC
+            ORDER BY timestamp DESC, id DESC
             LIMIT ?
         ''', (count,))
-        
+
         records = []
         for row in cursor.fetchall():
             records.append({
@@ -794,29 +1150,28 @@ class QuickPunishCog(commands.Cog):
                 'channel_name': row[4],
                 'executor_name': row[5],
                 'reason': row[6],
-                'removed_roles': json.loads(row[7]) if row[7] else [],
-                'status': row[8]
+                'removed_roles': self._parse_json_list(row[7]),
+                'status': row[8],
+                'source_type': row[9] or 'local'
             })
-        
+
         conn.close()
         return records
-    
+
     async def format_punishment_records(self, records: List[Dict], guild: discord.Guild) -> str:
         """格式化处罚记录为文本"""
         if not records:
             return "暂无处罚记录"
-        
+
         lines = ["===== 快速处罚记录 =====\n"]
-        
+
         for i, record in enumerate(records, 1):
-            # 解析时间
             try:
                 timestamp = datetime.fromisoformat(record['timestamp'])
                 time_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
             except:
                 time_str = record['timestamp']
-            
-            # 格式化身份组
+
             roles_str = "无"
             if record['removed_roles']:
                 role_names = []
@@ -827,42 +1182,22 @@ class QuickPunishCog(commands.Cog):
                     else:
                         role_names.append(f"ID:{role_id}")
                 roles_str = ", ".join(role_names)
-            
-            # 构建记录文本
+
             lines.append(f"【记录 #{i}】")
             lines.append(f"记录ID: {record['id']}")
             lines.append(f"用户: {record['user_name']} (ID: {record['user_id']})")
             lines.append(f"时间: {time_str}")
             lines.append(f"频道: #{record['channel_name']}")
             lines.append(f"执行者: {record['executor_name']}")
+            lines.append(f"来源: {record.get('source_type', 'local')}")
             lines.append(f"原因: {record['reason']}")
             lines.append(f"移除身份组: {roles_str}")
             lines.append(f"状态: {record['status']}")
             lines.append("-" * 50 + "\n")
-        
+
         return "\n".join(lines)
-    
-    async def get_last_punishment_for_user(self, user_id: str) -> Optional[Dict]:
-        """获取用户最近一次的处罚记录"""
-        conn = sqlite3.connect('quick_punish.db')
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT id, user_id, user_name, timestamp, original_message_id,
-                   original_message_link, channel_id, channel_name,
-                   executor_id, executor_name, reason, removed_roles, status
-            FROM quick_punish_records
-            WHERE user_id = ? AND status = 'executed'
-            ORDER BY timestamp DESC
-            LIMIT 1
-        ''', (user_id,))
-        
-        row = cursor.fetchone()
-        conn.close()
-        
-        if not row:
-            return None
-        
+
+    def _row_to_record(self, row: tuple) -> Dict[str, Any]:
         return {
             'id': row[0],
             'user_id': row[1],
@@ -875,27 +1210,82 @@ class QuickPunishCog(commands.Cog):
             'executor_id': row[8],
             'executor_name': row[9],
             'reason': row[10],
-            'removed_roles': json.loads(row[11]) if row[11] else [],
-            'status': row[12]
+            'removed_roles': self._parse_json_list(row[11]),
+            'status': row[12],
+            'source_type': (row[13] or 'local') if len(row) > 13 else 'local',
+            'removed_roles_by_guild': self._parse_json_roles_by_guild(row[14] if len(row) > 14 else {}),
+            'source_guild_id': row[15] if len(row) > 15 else None
         }
-    
+
+    def _has_restore_basis(self, record: Dict[str, Any]) -> bool:
+        by_guild = record.get('removed_roles_by_guild', {})
+        if isinstance(by_guild, dict) and any(v for v in by_guild.values()):
+            return True
+        return bool(record.get('removed_roles'))
+
+    async def get_last_punishment_for_user(self, user_id: str) -> Optional[Dict]:
+        """获取用户最近一次 executed 处罚记录"""
+        conn = sqlite3.connect('quick_punish.db')
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT id, user_id, user_name, timestamp, original_message_id,
+                   original_message_link, channel_id, channel_name,
+                   executor_id, executor_name, reason, removed_roles, status,
+                   source_type, removed_roles_by_guild, source_guild_id
+            FROM quick_punish_records
+            WHERE user_id = ? AND status = 'executed'
+            ORDER BY timestamp DESC, id DESC
+            LIMIT 1
+        ''', (user_id,))
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return None
+        return self._row_to_record(row)
+
+    async def get_last_revocable_local_record_for_user(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """获取最近可撤销（有恢复依据）的 local executed 记录"""
+        conn = sqlite3.connect('quick_punish.db')
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, user_id, user_name, timestamp, original_message_id,
+                   original_message_link, channel_id, channel_name,
+                   executor_id, executor_name, reason, removed_roles, status,
+                   source_type, removed_roles_by_guild, source_guild_id
+            FROM quick_punish_records
+            WHERE user_id = ? AND status = 'executed' AND COALESCE(source_type, 'local') = 'local'
+            ORDER BY timestamp DESC, id DESC
+            LIMIT 30
+        ''', (user_id,))
+        rows = cursor.fetchall()
+        conn.close()
+
+        for row in rows:
+            record = self._row_to_record(row)
+            if self._has_restore_basis(record):
+                return record
+        return None
+
     async def revoke_punishment(self, record_id: int) -> bool:
         """撤销处罚记录（更新状态为revoked）"""
         conn = sqlite3.connect('quick_punish.db')
         cursor = conn.cursor()
-        
+
         cursor.execute('''
             UPDATE quick_punish_records
             SET status = 'revoked'
             WHERE id = ? AND status = 'executed'
         ''', (record_id,))
-        
+
         affected = cursor.rowcount
         conn.commit()
         conn.close()
-        
+
         return affected > 0
-    
+
     async def restore_user_roles(self, member: discord.Member, roles_to_restore: List[int]) -> Tuple[List[int], List[int]]:
         """恢复用户的身份组
         返回: (成功恢复的身份组ID列表, 失败的身份组ID列表)
@@ -930,47 +1320,117 @@ class QuickPunishCog(commands.Cog):
         
         return restored_roles, failed_roles
     
-    async def _get_log_destination(self, guild: discord.Guild):
-        """获取日志发送目标（优先子区，其次频道）"""
+    async def _get_log_destination(self):
+        """全局获取日志发送目标（优先子区，其次频道）"""
         log_destination = None
-        
-        # 优先尝试使用子区
+
         if self.log_thread_id:
-            log_destination = guild.get_thread(self.log_thread_id)
+            log_destination = self.bot.get_channel(self.log_thread_id)
             if not log_destination:
-                # 子区可能被归档或删除，尝试从频道的归档子区中查找
-                if self.log_channel_id:
-                    parent_channel = guild.get_channel(self.log_channel_id)
-                    if parent_channel and hasattr(parent_channel, 'archived_threads'):
-                        try:
-                            async for thread in parent_channel.archived_threads(limit=100):
-                                if thread.id == self.log_thread_id:
-                                    log_destination = thread
-                                    # 尝试重新激活归档的子区
-                                    try:
-                                        await thread.edit(archived=False)
-                                    except:
-                                        pass
-                                    break
-                        except Exception as e:
-                            print(f"搜索归档子区时出错: {e}")
-        
-        # 如果没有找到子区，回退到频道
+                try:
+                    log_destination = await self.bot.fetch_channel(self.log_thread_id)
+                except Exception:
+                    log_destination = None
+
+            if isinstance(log_destination, discord.Thread) and log_destination.archived:
+                try:
+                    await log_destination.edit(archived=False)
+                except Exception:
+                    pass
+
         if not log_destination and self.log_channel_id:
-            log_destination = guild.get_channel(self.log_channel_id)
-        
+            log_destination = self.bot.get_channel(self.log_channel_id)
+            if not log_destination:
+                try:
+                    log_destination = await self.bot.fetch_channel(self.log_channel_id)
+                except Exception:
+                    log_destination = None
+
         return log_destination
-    
-    async def send_revoke_log_embed(self, channel: discord.TextChannel,
+
+    def _build_restore_targets(self, record: Dict[str, Any], fallback_guild_id: Optional[int]) -> Dict[str, List[int]]:
+        by_guild = record.get("removed_roles_by_guild", {}) or {}
+        if by_guild:
+            restored: Dict[str, List[int]] = {}
+            for gid, roles in by_guild.items():
+                parsed_roles = self._parse_json_list(roles)
+                if parsed_roles:
+                    restored[str(gid)] = parsed_roles
+            if restored:
+                return restored
+
+        legacy_roles = self._parse_json_list(record.get("removed_roles", []))
+        if not legacy_roles:
+            return {}
+
+        source_gid = record.get("source_guild_id") or (str(fallback_guild_id) if fallback_guild_id else None)
+        if not source_gid:
+            return {}
+        return {str(source_gid): legacy_roles}
+
+    async def _execute_revoke_record(self, interaction: discord.Interaction, user_id: str, record: Dict[str, Any]) -> Tuple[bool, str]:
+        restore_targets = self._build_restore_targets(record, interaction.guild.id if interaction.guild else None)
+        if not restore_targets:
+            return False, f"在数据库中找不到（{user_id}）的上次处罚移除了什么身份组，可能是由于上次处罚来源于同步，请检查日志频道。"
+
+        restored_roles: List[int] = []
+        failed_roles: List[int] = []
+        detail_lines: List[str] = []
+
+        for guild_id, roles in restore_targets.items():
+            guild = self.bot.get_guild(int(guild_id)) if str(guild_id).isdigit() else None
+            if not guild:
+                failed_roles.extend(roles)
+                detail_lines.append(f"❌ {guild_id}: 机器人不在该服务器")
+                continue
+
+            member = await self._resolve_member_in_guild(guild, int(user_id))
+            if not member:
+                failed_roles.extend(roles)
+                detail_lines.append(f"❌ {guild.name}: 用户不在服务器")
+                continue
+
+            restored, failed = await self.restore_user_roles(member, roles)
+            restored_roles.extend(restored)
+            failed_roles.extend(failed)
+            detail_lines.append(f"✅ {guild.name}: 恢复 {len(restored)} 个，失败 {len(failed)} 个")
+
+        success = await self.revoke_punishment(record['id'])
+        if not success:
+            return False, "❌ 撤销处罚失败，可能记录已被修改"
+
+        log_destination = await self._get_log_destination()
+        if log_destination:
+            await self.send_revoke_log_embed(
+                channel=log_destination,
+                record=record,
+                revoker=interaction.user,
+                restored_roles=restored_roles,
+                failed_roles=failed_roles,
+                restore_targets=restore_targets
+            )
+
+        message = (
+            f"✅ 成功撤销对用户 **{record['user_name']}** (ID: {user_id}) 的处罚\n"
+            f"记录ID: {record['id']}\n"
+            f"原处罚时间: {record['timestamp']}\n"
+            f"原处罚原因: {record['reason']}\n"
+            f"来源: {record.get('source_type', 'local')}\n"
+            + "\n".join(detail_lines)
+        )
+        return True, message
+
+    async def send_revoke_log_embed(self, channel: discord.abc.Messageable,
                                    record: Dict, revoker: discord.User,
-                                   restored_roles: List[int], failed_roles: List[int]):
+                                   restored_roles: List[int], failed_roles: List[int],
+                                   restore_targets: Dict[str, List[int]]):
         """发送撤销日志Embed到指定频道"""
         embed = discord.Embed(
             title="↩️ 快速处罚撤销",
             color=discord.Color.green(),
             timestamp=datetime.now()
         )
-        
+
         embed.add_field(
             name="撤销对象",
             value=f"{record['user_name']} (ID: {record['user_id']})",
@@ -978,22 +1438,25 @@ class QuickPunishCog(commands.Cog):
         )
         embed.add_field(name="撤销者", value=f"{revoker.mention}", inline=True)
         embed.add_field(name="原执行者", value=record['executor_name'], inline=True)
-        
-        # 原处罚信息
+        embed.add_field(name="来源", value=record.get('source_type', 'local'), inline=True)
+
         embed.add_field(name="原处罚原因", value=record['reason'], inline=False)
         embed.add_field(name="原处罚时间", value=record['timestamp'], inline=False)
-        
-        # 身份组恢复情况
+
+        target_lines = [f"{gid}: {len(roles)}个" for gid, roles in restore_targets.items()]
+        if target_lines:
+            embed.add_field(name="恢复目标服务器", value="\n".join(target_lines), inline=False)
+
         if restored_roles:
             roles_str = ", ".join([f"<@&{role_id}>" for role_id in restored_roles])
             embed.add_field(name="✅ 已恢复身份组", value=roles_str, inline=False)
-        
+
         if failed_roles:
             failed_str = ", ".join([f"ID:{role_id}" for role_id in failed_roles])
             embed.add_field(name="❌ 恢复失败的身份组", value=failed_str, inline=False)
-        
+
         embed.set_footer(text=f"撤销的记录ID: {record['id']}")
-        
+
         try:
             await channel.send(embed=embed)
         except Exception as e:
@@ -1070,10 +1533,11 @@ class QuickPunishCog(commands.Cog):
                 field_name = f"{status_emoji} #{record['id']} - {record['user_name']}"
                 field_value = (
                     f"时间: {time_str}\n"
+                    f"来源: {record.get('source_type', 'local')}\n"
                     f"原因: {record['reason'][:50]}{'...' if len(record['reason']) > 50 else ''}\n"
                     f"执行者: {record['executor_name']}"
                 )
-                
+
                 embed.add_field(name=field_name, value=field_value, inline=False)
             
             embed.set_footer(text=f"查询者: {interaction.user.name}")
@@ -1101,29 +1565,24 @@ class QuickPunishCog(commands.Cog):
     @app_commands.guild_only()
     async def quick_punish_revoke(self, interaction: discord.Interaction, user_id: str):
         """撤销快速处罚命令"""
-        # 立即defer响应
         await interaction.response.defer(ephemeral=True)
-        
-        # 检查功能是否启用
+
         if not self.enabled:
             await interaction.followup.send(
                 "❌ 快速处罚功能未启用",
                 ephemeral=True
             )
             return
-        
-        # 检查权限
+
         if not self.has_permission(interaction):
             await interaction.followup.send(
                 "❌ 您没有权限使用此命令",
                 ephemeral=True
             )
             return
-        
-        # 验证用户ID格式
+
         try:
             user_id = user_id.strip()
-            # 尝试转换为整数以验证格式
             int(user_id)
         except ValueError:
             await interaction.followup.send(
@@ -1131,75 +1590,72 @@ class QuickPunishCog(commands.Cog):
                 ephemeral=True
             )
             return
-        
-        # 获取最近的处罚记录
-        record = await self.get_last_punishment_for_user(user_id)
-        
-        if not record:
+
+        latest_record = await self.get_last_punishment_for_user(user_id)
+        if not latest_record:
             await interaction.followup.send(
                 f"❌ 未找到用户 {user_id} 的处罚记录",
                 ephemeral=True
             )
             return
-        
-        # 检查记录状态
-        if record['status'] == 'revoked':
-            await interaction.followup.send(
-                f"❌ 该处罚记录已经被撤销过了\n记录ID: {record['id']}",
-                ephemeral=True
+
+        local_record = await self.get_last_revocable_local_record_for_user(user_id)
+
+        if latest_record.get("source_type") == "sync":
+            if not local_record:
+                await interaction.followup.send(
+                    f"在数据库中找不到（{user_id}）的上次处罚移除了什么身份组，可能是由于上次处罚来源于同步，请检查日志频道。",
+                    ephemeral=True
+                )
+                return
+
+            warn_embed = discord.Embed(
+                title="⚠️ 二次确认 - 最新记录为同步记录",
+                description=(
+                    "最新处罚记录来源为 **sync**，该记录通常不包含可恢复身份组。\n"
+                    "确认后将自动回溯并撤销最近一条可恢复的 **local** 记录。"
+                ),
+                color=discord.Color.orange(),
+                timestamp=datetime.now()
             )
-            return
-        
-        # 获取用户对象
-        guild = interaction.guild
-        member = guild.get_member(int(user_id))
-        
-        restored_roles = []
-        failed_roles = []
-        
-        # 如果用户在服务器中，尝试恢复身份组
-        if member and record['removed_roles']:
-            restored_roles, failed_roles = await self.restore_user_roles(member, record['removed_roles'])
-        elif not member:
-            # 用户不在服务器中，无法恢复身份组
-            failed_roles = record['removed_roles']
-        
-        # 更新数据库状态
-        success = await self.revoke_punishment(record['id'])
-        
-        if not success:
-            await interaction.followup.send(
-                "❌ 撤销处罚失败，可能记录已被修改",
-                ephemeral=True
+            warn_embed.add_field(
+                name="最新记录（sync）",
+                value=f"ID: {latest_record['id']}\n时间: {latest_record['timestamp']}\n原因: {latest_record['reason']}",
+                inline=False
             )
+            warn_embed.add_field(
+                name="将撤销记录（local）",
+                value=f"ID: {local_record['id']}\n时间: {local_record['timestamp']}\n原因: {local_record['reason']}",
+                inline=False
+            )
+
+            view = RevokeConfirmView(
+                cog=self,
+                target_user_id=user_id,
+                latest_record=latest_record,
+                revoke_record=local_record
+            )
+            await interaction.followup.send(embed=warn_embed, view=view, ephemeral=True)
             return
-        
-        # 构建成功消息
-        success_msg = f"✅ 成功撤销对用户 **{record['user_name']}** (ID: {user_id}) 的处罚\n"
-        success_msg += f"记录ID: {record['id']}\n"
-        success_msg += f"原处罚时间: {record['timestamp']}\n"
-        success_msg += f"原处罚原因: {record['reason']}\n"
-        
-        if member:
-            if restored_roles:
-                success_msg += f"✅ 已恢复 {len(restored_roles)} 个身份组\n"
-            if failed_roles:
-                success_msg += f"⚠️ {len(failed_roles)} 个身份组恢复失败（可能已删除）\n"
+
+        if latest_record.get("source_type") == "local":
+            target_record = latest_record
         else:
-            success_msg += "⚠️ 用户不在服务器中，无法恢复身份组\n"
-        
-        await interaction.followup.send(success_msg, ephemeral=True)
-        
-        # 发送到日志频道或子区
-        log_destination = await self._get_log_destination(guild)
-        if log_destination:
-            await self.send_revoke_log_embed(
-                channel=log_destination,
-                record=record,
-                revoker=interaction.user,
-                restored_roles=restored_roles,
-                failed_roles=failed_roles
+            target_record = local_record
+
+        if not target_record:
+            await interaction.followup.send(
+                f"在数据库中找不到（{user_id}）的上次处罚移除了什么身份组，可能是由于上次处罚来源于同步，请检查日志频道。",
+                ephemeral=True
             )
+            return
+
+        _, message = await self._execute_revoke_record(
+            interaction=interaction,
+            user_id=user_id,
+            record=target_record
+        )
+        await interaction.followup.send(message, ephemeral=True)
 
 
 # 定义上下文菜单命令（必须在类外部）
